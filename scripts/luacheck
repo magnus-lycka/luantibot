@@ -1,0 +1,9 @@
+#!/bin/sh
+# Lint Lua sources. Paths come from pre-commit; with no arguments, lint the mod.
+set -e
+. "$(dirname "$0")/lua-env.sh"
+cd "$REPO_ROOT"
+if [ "$#" -eq 0 ]; then
+    exec luacheck mods
+fi
+exec luacheck "$@"

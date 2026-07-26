@@ -1,0 +1,7 @@
+#!/bin/sh
+# Run the Lua unit suite. Busted resolves src/?.lua via mods/luantibot/.busted,
+# so it must run from the mod directory.
+set -e
+. "$(dirname "$0")/lua-env.sh"
+cd "$REPO_ROOT/mods/luantibot"
+exec busted "$@"

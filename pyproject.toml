@@ -1,0 +1,55 @@
+[project]
+name = "luantibot"
+version = "0.1.0"
+description = "Compiles build intent into volumetric primitives for a Luanti builder mod"
+readme = "README.md"
+authors = [
+    { name = "Magnus Lyckå", email = "magnus.lycka@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.140.0",
+    "httpx>=0.28.1",
+    "mcp>=1.28.1",
+    "pydantic>=2.13.4",
+    "uvicorn>=0.51.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.29,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "bandit>=1.9.4",
+    "deptry>=0.25.1",
+    "hypothesis>=6.161.5",
+    "pre-commit>=4.6.1",
+    "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.16.0",
+    "ty>=0.0.63",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.deptry.per_rule_ignores]
+# Declared at M0 per the plan, imported as the milestones land. Delete each
+# entry when the corresponding module starts importing it.
+#   fastapi, pydantic  -> M1.2 (service)
+#   httpx              -> M1.2 (API tests) and M1.5 (MCP client)
+#   mcp                -> M1.5
+#   uvicorn            -> never imported; invoked as a server
+DEP002 = ["fastapi", "httpx", "mcp", "pydantic", "uvicorn"]

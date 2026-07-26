@@ -1,0 +1,867 @@
+# Luantibot — Implementation Plan
+
+A test-driven build order for the Luanti builder bot: a Python service that
+compiles high-level build intent into volumetric primitives, and a thin Lua mod
+inside Luanti that applies them.
+
+This document assumes the design decisions in [suggestion_claude.md](suggestion_claude.md)
+and [suggestion_chatgpt.md](suggestion_chatgpt.md), with these amendments:
+
+- The mod receives **ordered volumetric primitives** (`fill_box`, `fill_box_if`),
+  not semantic operations (`corridor`) and not node arrays. Geometry compiles in
+  Python.
+- Single server, single worker, single user. No protection checks, no
+  concurrency, no multi-worker addressing.
+- Persistence is **SQLite**, one writer process.
+- Lighting is deferred, not inline.
+- Node validation is a **deny** list, not an allow-list — see "On node
+  validation".
+- Interrupted jobs are never resumed. Recovery is restore-then-re-run, manually
+  triggered, and does not exist before M6 — see "Crash recovery protocol".
+
+## Division of labour
+
+**Python owns everything that requires thinking.**
+
+- Geometry compilation: road/corridor/chamber/shaft intent → ordered box list.
+- Terrain reasoning: where to tunnel, where to bridge, how deep pillars go.
+- Job lifecycle, persistence, history.
+- The MCP tool surface that Claude/ChatGPT calls.
+
+**Lua owns everything that must touch the world.**
+
+- Poll for a job, execute it, report back.
+- Validate coordinates, volumes, and node names (registered, not `ignore`, not
+  on the deny list).
+- Emerge → VoxelManip read → apply boxes → write.
+- Chunk work across server steps.
+- Snapshot regions before writing, restore on request.
+
+**The Lua mod contains no geometry.** If you find yourself writing a loop in Lua
+that computes *where* something goes rather than *applying* what it was told,
+that logic belongs in Python. This is not aesthetic — it is what keeps the
+iteration loop fast, because changing Python is a process restart and changing
+Lua is a server restart.
+
+## Repository layout
+
+```text
+luantibot/
+├── pyproject.toml
+├── uv.lock
+├── .pre-commit-config.yaml
+├── .luacheckrc
+├── .stylua.toml
+├── docs/
+│   └── implementation_plan.md
+├── src/luantibot/
+│   ├── __init__.py
+│   ├── ops.py              # wire-format dataclasses/models, versioning
+│   ├── compile/            # intent → ops. Pure functions, no I/O.
+│   │   ├── boxes.py
+│   │   ├── corridor.py
+│   │   └── road.py
+│   ├── service/
+│   │   ├── app.py          # FastAPI app
+│   │   ├── store.py        # SQLite, single writer
+│   │   └── schema.sql
+│   └── mcp_server.py       # MCP tools → HTTP client of the service
+├── tests/
+│   ├── unit/               # pure Python, fast
+│   ├── api/                # FastAPI TestClient
+│   └── contract/           # validates shared fixtures
+├── contract/
+│   └── fixtures/*.json     # shared between Python and Lua tests
+└── mods/luantibot/
+    ├── mod.conf
+    ├── init.lua            # wiring: acquires engine handles, injects them
+    ├── src/
+    │   ├── validate.lua    # pure
+    │   ├── plan.lua        # pure: job → work units
+    │   ├── palette.lua     # pure: takes an injected resolve(name) -> id
+    │   ├── apply.lua       # pure: ops + area bounds → mutate a data array
+    │   ├── poll.lua        # pure: state machine; takes injected http + json
+    │   ├── world.lua       # adapter: emerge, VoxelManip, content ids
+    │   └── snapshot.lua    # adapter: region serialisation (M6)
+    └── spec/               # busted tests
+```
+
+The mod must be visible to Luanti. Symlink it once:
+
+```sh
+ln -s ~/work/luantibot/mods/luantibot \
+      ~/Library/Application\ Support/minetest/worlds/Marduk1/worldmods/luantibot
+```
+
+And in `minetest.conf`:
+
+```ini
+secure.http_mods = luantibot
+```
+
+## Python toolchain
+
+```sh
+uv init --package .
+uv add fastapi uvicorn httpx pydantic mcp
+uv add --dev pytest pytest-cov hypothesis ruff ty deptry bandit pre-commit
+```
+
+FastAPI over plain `http.server`: you get request validation from the same
+Pydantic models that define the wire format, and `TestClient` makes the API
+layer testable without a running process. Both matter here.
+
+`pyproject.toml` additions:
+
+```toml
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+
+[tool.bandit]
+exclude_dirs = ["tests"]
+
+[tool.deptry.per_rule_ignores]
+DEP002 = ["uvicorn"]   # imported by nothing; invoked as a server
+```
+
+## Lua toolchain
+
+You need three tools. None of them are part of Luanti.
+
+Luanti embeds **LuaJIT, which is Lua 5.1**. Homebrew's `lua` is 5.5, and the
+differences land exactly where our risk is: integer/float division, `//`,
+`unpack` vs `table.unpack`. Testing pure modules on 5.5 would give false
+confidence about voxel index arithmetic. So install against LuaJIT, into a
+project-local rocks tree:
+
+```sh
+brew install luajit luarocks stylua
+luarocks --lua-version=5.1 --lua-dir="$(brew --prefix luajit)" \
+         --tree=.luarocks install busted
+luarocks --lua-version=5.1 --lua-dir="$(brew --prefix luajit)" \
+         --tree=.luarocks install luacheck
+```
+
+`scripts/lua-env.sh` wraps the resulting `LUA_PATH`/`PATH` dance; run the tools
+through `./scripts/busted` and `./scripts/luacheck` rather than directly.
+
+- **busted** — the standard Lua test framework. `describe`/`it`/`assert.are.same`,
+  familiar shape if you've used pytest or RSpec. Run `busted` from
+  `mods/luantibot/`.
+- **luacheck** — static analysis. Its main job here is catching typo'd globals,
+  which in Lua are silently `nil` rather than an error. This is the single
+  highest-value Lua tool.
+- **stylua** — formatter. Rust binary, no config needed beyond a line width.
+
+`.luacheckrc`:
+
+```lua
+std = "lua51"
+max_line_length = 100
+read_globals = {
+    "core", "minetest", "vector", "VoxelManip", "VoxelArea",
+    "ItemStack", "PseudoRandom", "PerlinNoise", "dump", "dump2",
+}
+globals = { "luantibot" }
+ignore = { "212/self" }
+```
+
+`.stylua.toml`:
+
+```toml
+column_width = 100
+indent_type = "Spaces"
+indent_width = 4
+```
+
+### The constraint that makes Lua testable
+
+Busted runs in a plain Lua interpreter. There is no `core` table, no
+`VoxelManip`, no world. Any module that calls `core.*` cannot be unit tested
+without an engine mock, and engine mocks rot.
+
+So every Lua file is one of exactly two kinds, and the kind is stated at the top
+of the file:
+
+**Pure modules** never reference `core`, `VoxelManip`, or any other engine
+global. Where they need an engine capability they receive it as an argument:
+`palette.lua` takes a `resolve(name) -> content_id` function, `poll.lua` takes
+`http` and `json` tables, `plan.lua` takes nothing but numbers. They are unit
+tested with busted and fakes that are a dozen lines each.
+
+**Adapters** may touch the engine, and in exchange are allowed no logic — no
+branching on job content, no arithmetic beyond argument shuffling. `world.lua`
+wraps `core.emerge_area`, `core.get_voxel_manip`, `core.get_content_id`.
+`snapshot.lua` wraps file I/O. `init.lua` is the wiring that acquires engine
+handles at load time — including `core.request_http_api()`, which *must* run at
+top level — and injects them into the pure modules. Adapters get integration
+coverage only.
+
+The test for which file something belongs in: if you can imagine a bug in it, it
+goes in a pure module. `apply.lua` doesn't take a VoxelManip, it takes a flat
+array of content ids plus area bounds and mutates the array — that's where the
+real correctness risk lives (off-by-one on box bounds, wrong index arithmetic)
+and it must be unit testable.
+
+There is a project called **mineunit** that mocks the Luanti API for busted.
+Evaluate it if you want, but with the engine surface confined to two adapters
+you don't need it, and a hand-rolled fake is less likely to break on a Luanti
+upgrade.
+
+## Testing strategy
+
+Four layers, in decreasing order of how often you run them.
+
+**1. Lua unit (busted, milliseconds).** Pure modules. Box math, validation,
+chunking, palette resolution. Most of your Lua tests live here.
+
+**2. Python unit (pytest, milliseconds).** The geometry compiler is pure
+functions from intent to box lists — ideal for property-based tests with
+hypothesis. Assert invariants rather than exact output, or the tests break every
+time you improve the compiler:
+
+- every emitted box lies inside the job's declared bounding box;
+- the interior of a corridor is connected end to end;
+- no box has `min > max` on any axis;
+- compiling twice with the same inputs gives the same output.
+
+One more property belongs here. Model `apply.lua`'s per-node semantics in a few
+lines of Python and assert, over random worlds and **op lists the compiler
+actually emits**:
+
+```python
+assert apply(apply(world, ops), ops) == apply(world, ops)
+```
+
+Note the restriction. Op lists in general are *not* idempotent — see "Why
+re-running is not safe in general" below — so this is a property of the
+compiler's output, not of the op vocabulary.
+
+It is not a recovery property: `retry` restores before re-running and doesn't
+depend on it. What it catches is a compiler emitting order-dependent nonsense,
+which surfaces the moment you submit the same intent twice — an ordinary thing to
+do while iterating on a design.
+
+**3. Python API (pytest + TestClient, ~1s).** Job submission, reservation,
+progress, completion, restart sweep. Runs against a temporary SQLite file.
+Because these test the HTTP surface rather than the store, they don't change
+when the storage layer does.
+
+**4. Integration (real Luanti, ~30s).** A headless server on a scratch world,
+with the mod driven by a real Python service. This is the only place the adapters
+— `world.lua`, `snapshot.lua`, `init.lua` — and the real `emerge_area` and
+VoxelManip get exercised. Run it per milestone, not per save.
+
+### Contract fixtures
+
+`contract/fixtures/` holds JSON job documents that both sides load. Python tests
+assert its compiler emits documents matching them; Lua tests assert its parser
+accepts them and produces the expected work units. When you change the wire
+format, both suites fail, which is the point. This catches drift without needing
+a full integration run.
+
+### Integration harness
+
+Use a **scratch world**, never Marduk1, and use SQLite for its map backend so it
+is disposable:
+
+```sh
+rm -rf ~/Library/Application\ Support/minetest/worlds/lbtest
+```
+
+Drive the server headless and let a test mod assert and shut down:
+
+```sh
+LUANTI=~/work/luanti/build-postgresql/macos/luanti.app/Contents/MacOS/luanti
+"$LUANTI" --server --world .../worlds/lbtest --config tests/integration/test.conf
+```
+
+Assertions go in a `luantibot_test` mod that runs on
+`core.register_on_mods_loaded`, exercises the real API, calls
+`core.request_shutdown()`, and writes a result file the shell script checks.
+`core.log("error", ...)` lines in `debug.txt` are your test output.
+
+Confirm in M0 that this build actually supports `--server`; if the macOS bundle
+is client-only, run the client with `--go --gameid ...` in a headless-friendly
+config instead, or build the server target separately.
+
+## Pre-commit
+
+Run Python tools through `uv run` as local hooks rather than pre-commit's own
+isolated environments. That guarantees the hook uses the version in `uv.lock`,
+so CI, your shell, and the hook can't disagree.
+
+`.pre-commit-config.yaml`:
+
+```yaml
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-toml
+      - id: check-yaml
+      - id: check-json
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+
+      - id: ty
+        name: ty check
+        entry: uv run ty check
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: deptry
+        name: deptry
+        entry: uv run deptry src
+        language: system
+        pass_filenames: false
+        files: ^(src/|pyproject\.toml)
+
+      - id: bandit
+        name: bandit
+        entry: uv run bandit -c pyproject.toml -q -r src
+        language: system
+        pass_filenames: false
+        files: ^src/
+
+      - id: stylua
+        name: stylua
+        entry: stylua
+        language: system
+        types: [lua]
+
+      - id: luacheck
+        name: luacheck
+        entry: luacheck
+        language: system
+        types: [lua]
+
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: busted
+        name: busted
+        entry: sh -c 'cd mods/luantibot && busted'
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+```
+
+Test suites on `pre-push` rather than `pre-commit` — small commits stay fast,
+and nothing broken reaches the remote.
+
+`ty` is very new. If it produces noise on FastAPI or Pydantic types, narrow it
+to `src/luantibot/compile` and `src/luantibot/ops.py` first — the pure code is
+where type checking pays off anyway — and widen as it matures.
+
+## Wire contract
+
+Versioned from the first commit, because the mod and service restart
+independently.
+
+```json
+{
+  "format": 1,
+  "job_id": 173,
+  "world": "Marduk1",
+  "palette": ["air", "mcl_core:stonebrick", "mcl_core:stone"],
+  "bounds": {"min": [-6000, -20, -5500], "max": [-5800, 30, -5350]},
+  "ops": [
+    {"op": "emerge"},
+    {"op": "fill_box_if", "min": [-6000,10,-5500], "max": [-5995,15,-5495],
+     "node": 2, "match": ["air", "group:liquid", "group:falling_node"]},
+    {"op": "fill_box", "min": [-5999,11,-5499], "max": [-5996,14,-5496],
+     "node": 0}
+  ]
+}
+```
+
+Rules the mod enforces, in order, before touching the world:
+
+1. `format` is recognised.
+2. `world` matches this server.
+3. Every palette entry is a registered node, is not `ignore`, and is not on the
+   deny list. Resolve to content ids once.
+4. Every op type is known.
+5. Every box is well-formed, inside `bounds`, and inside the world limits.
+6. Total volume of `bounds` is under a configured cap.
+7. All numbers are finite integers.
+
+Group expressions (`group:liquid`) are permitted only in a `match` predicate,
+never in `palette`. A palette entry names one concrete node.
+
+### On node validation
+
+Rule 3 is a **deny** list, not an allow-list, and that is deliberate. VoxelManip
+writes bypass node callbacks, so the frightening cases mostly aren't: TNT written
+by VM does not detonate. The two node classes that actually cause damage are
+liquids and gravity nodes, and `fill_box_if` (M3) exists precisely to handle
+them. An allow-list would block you the first time you want a lava-lit hall in a
+Traveller complex, in exchange for guarding against an adversary this system
+doesn't have.
+
+So: ship an empty deny list and a config key to populate it. Add entries when
+something surprises you, not in anticipation.
+
+### Ordering and work units
+
+**Reference semantics.** Apply each op, in original order, across the whole of
+`bounds`. Shell before carve. This is the definition of what a job means, and
+it's the obvious op-major loop: `for op in ops: for cell in op.box: apply`.
+
+**Implementation.** Op-major execution would require emerging and VoxelManip'ing
+the entire bounds once per op, which is unaffordable. So the mod runs unit-major
+instead, one emerge/VM cycle per unit:
+
+> Partition `bounds` into **disjoint** mapblock-aligned units. For each unit,
+> walk the op list in original order, intersect each op's box with that unit, and
+> apply the intersection.
+
+The two traversals are equivalent **because `fill_box` and `fill_box_if` are
+node-local**: neither reads a neighbouring node, so each cell's outcome depends
+only on the ordered sequence of ops covering that cell, which unit-major
+preserves exactly. Unit-major is chosen for cost, not for semantics.
+
+Three things break that equivalence, and only these three:
+
+1. **Reordering ops at a node.** Within a unit the op list must be walked in
+   original order. Grouping or sorting ops by anything is what goes wrong.
+2. **Units overlapping in what they write.** If a later milestone reads a margin
+   of surrounding mapblocks (M8 lighting will want one), the VoxelManip region
+   overlaps its neighbours but the written region must not.
+3. **Neighbour-reading ops.** Flood fill, connected-component selection,
+   structural support detection. Adding one invalidates unit decomposition
+   outright and needs a different execution model. Do not add one without
+   revisiting this section.
+
+Reporting endpoints as in [suggestion_chatgpt.md](suggestion_chatgpt.md#L120):
+`GET /v1/workers/{id}/jobs/next`, `POST /v1/jobs/{id}/{started,progress,completed,failed}`,
+plus `abandoned` from M4 and `undo` / `retry` from M6.
+
+## Crash recovery protocol
+
+Two processes hold state about the same job: the service (a row) and the mod (a
+job id in `core.get_mod_storage()`). They reconcile at mod startup, and the rule
+is that **the mod never resumes**.
+
+1. On startup, if mod storage holds a job id, the mod reports
+   `POST /v1/jobs/{id}/abandoned` with the unit count it reached, clears storage,
+   and goes on to ask for the next job. It does not attempt to continue.
+2. The service moves that row to `interrupted`.
+3. On *service* startup, any `running` row whose `heartbeat_at` is older than the
+   stale threshold also moves to `interrupted`. This covers the mod dying without
+   getting its report out.
+4. `interrupted` is terminal until you act on it. What "acting on it" means
+   depends on the milestone — see below.
+
+Requeue is deliberately manual. A job that crashes the server would otherwise
+auto-retry into a crash loop, and this is a tool you sit in front of — you would
+rather see the row than have it thrash.
+
+Mod storage exists for *reconciliation*, not resumption: its only job is to let
+the mod name the job it was killed during.
+
+### Why re-running is not safe in general
+
+An interrupted job leaves the world partially modified. Re-running the same op
+list over that partial state does **not** reliably reproduce the intended
+result, because an ordered sequence of `fill_box_if` operations is not
+idempotent. The minimal counterexample:
+
+```text
+op1: stone -> dirt
+op2: air   -> stone
+
+start = air:   run 1 gives stone   (op1 misses, op2 fires)
+               run 2 gives dirt    (op1 now fires on the stone op2 wrote)
+```
+
+The structural cause is that an earlier op's predicate matches a later op's
+output. Some op lists survive this — the tunnel pattern does, because the carve
+op is an unconditional `fill_box` and unconditional writes erase history — but
+that is a property of particular compiler output, not a guarantee of the op
+vocabulary. Do not build recovery on it.
+
+### Recovery, by milestone
+
+**Before M6 (no snapshots).** There is no sound automatic recovery. `interrupted`
+is genuinely terminal: inspect the row, look at the world, and fix it by hand or
+submit a corrected job. Do not add a `retry` endpoint yet — an endpoint that is
+usually right is worse than no endpoint, because you will trust it.
+
+**From M6 onward.** `POST /v1/jobs/{id}/retry` is defined as **restore, then
+re-run**, as one operation: replay the job's existing snapshots in reverse,
+reset `units_done` to zero, and requeue. The region is then back at its recorded
+pre-job **node type and orientation** — not metadata, inventories, timers or
+lighting, none of which are snapshotted (see M6). That is enough for the re-run
+to be sound, because every op's predicate reads only node type; it is not a
+claim that the world is byte-for-byte as it was.
+
+The re-run keeps snapshotting on, per-unit, under the rule in M6: units already
+holding a snapshot file are skipped, units the failed attempt never reached are
+snapshotted as they come. Suppressing snapshots wholesale during a retry would
+leave the untouched tail with no record and break `undo`.
+
+The property test in Testing strategy layer 2 no longer supports recovery at
+all — retry doesn't need it. It stays as a **compiler** sanity check: submitting
+the same intent twice should not build something different the second time, which
+is an ordinary authoring action and a plausible source of order-dependent
+compiler bugs. It says nothing about whether a half-built structure is coherent;
+it isn't.
+
+## Milestones
+
+Each has a **Done when** you can actually check. Don't start the next one until
+it passes.
+
+### M0 — Skeleton and tooling
+
+No functionality. The goal is that both test suites run and pre-commit is green,
+so every later step has somewhere to put its test.
+
+1. `uv init`, add dependencies, commit `uv.lock`.
+2. `pyproject.toml` config, one trivial passing pytest.
+3. Install luarocks/busted/luacheck/stylua. `.luacheckrc`, `.stylua.toml`, one
+   trivial passing busted spec.
+4. `.pre-commit-config.yaml`, `pre-commit install --install-hooks`,
+   `pre-commit install --hook-type pre-push`.
+5. Create the scratch world and confirm the custom Luanti build starts headless
+   and shuts down on command. Note the exact binary path and flags in
+   `tests/integration/README.md`.
+
+**Done when** `pre-commit run --all-files` is clean, `uv run pytest` and
+`busted` both pass, and you have a one-line command that boots and stops a
+scratch server.
+
+### M1 — Emerge, end to end
+
+The whole pipeline with the one operation that cannot damage anything. Nothing
+here writes a node.
+
+**1.1 — Mod loads and emerges via chat command.**
+`mod.conf` with `name = luantibot`. `world.lua` exposes
+`emerge(p1, p2, on_done)` wrapping `core.emerge_area`; completion is the
+callback invocation with `calls_remaining == 0`, and any callback with action
+`core.EMERGE_ERRORED` or `EMERGE_CANCELLED` fails the whole operation. Register
+`/lb_emerge <x> <y> <z> <radius>`.
+
+*Test first:* a busted spec for `plan.lua` that converts a centre+radius into a
+mapblock-aligned `(p1, p2)` pair. That's the pure part. Then verify the chat
+command by hand on the scratch world and watch `debug.txt`.
+
+**1.2 — Service with an in-memory queue.**
+`POST /v1/jobs`, `GET /v1/workers/{id}/jobs/next` returning 200 or 204,
+`POST /v1/jobs/{id}/completed`, `POST /v1/jobs/{id}/failed`.
+
+*Test first:* API tests for submit → fetch → complete, fetch-when-empty → 204,
+and fetching twice reserves only once.
+
+**1.3 — SQLite behind the same API.**
+Schema per the earlier discussion: `job(id, created_at, state, intent_json,
+ops_json, bbox_min_x…bbox_max_z, heartbeat_at, started_at, finished_at,
+units_done, units_total, error_code, error_msg, snapshot_path)`. WAL mode.
+Reservation is a single `UPDATE … WHERE state='queued' … RETURNING`. Implement
+step 3 of the recovery protocol here — the service-startup sweep of stale
+`running` rows. `abandoned` waits until M4, when there is work long enough to be
+interrupted; `retry` until M6, when there is a snapshot to restore from.
+
+*Test first:* the M1.2 API tests must pass unchanged against the new store —
+that's the proof the API doesn't leak the schema. Then add tests for the startup
+sweep and for double-reservation under a repeated call.
+
+**1.4 — Lua polls over HTTP.**
+`local http = core.request_http_api()` at the **top level** of `init.lua` — it
+returns nil if called later or if the mod isn't in `secure.http_mods`. Use
+`core.parse_json` / `core.write_json`; you do not need dkjson. A globalstep
+accumulates `dtime` and fetches every ~2s when idle, immediately after a
+completed job.
+
+*Test first:* busted specs for `poll.lua`'s state machine with an injected fake
+`http` — idle → job → running → report → idle, plus what happens when the
+service is down (back off, don't spin).
+
+**1.5 — MCP tool.**
+One tool, `emerge_area(min, max)`, that POSTs a job and returns the id. The MCP
+server is an HTTP client of the service, not a second SQLite writer.
+
+**Done when** you say "emerge the area around -5900, 10, -5450" to Claude, the
+mapblocks generate, and the job row in SQLite reads `completed` with a sensible
+duration.
+
+### M2 — `fill_box`, the first mutation
+
+1. `apply.lua`: `fill_box(data, area, min, max, content_id)` over a flat array.
+   *Heavily unit tested* — this is where index arithmetic bugs live. Cover
+   single-node boxes, boxes clipped to the area edge, and boxes entirely outside.
+2. `palette.lua`: names → content ids through an injected `resolve` function
+   (`core.get_content_id`, supplied by `init.lua`), failing the job on any
+   unregistered name. Reject `ignore` and deny-list entries explicitly. Unit
+   tested with a table-backed fake resolver.
+3. `validate.lua`: the seven rules above, with a spec per rule.
+4. `world.lua`: emerge → `vm:get_data` → apply → `vm:set_data` → `vm:write_to_map`.
+   No lighting call. No liquid update.
+5. Extend the job format and the service to carry `palette` and `ops`.
+
+**Done when** a single job builds a 20×5×20 stone slab in the scratch world,
+you can see it in-game, and re-running the identical job changes nothing.
+
+### M3 — `fill_box_if`
+
+Conditional replacement against a match set: explicit node names plus the two
+groups that matter, `liquid` and `falling_node`. Resolve groups to a content-id
+set once at job start, so the inner loop is a set lookup.
+
+**Done when** a tunnel shell built with
+`fill_box_if(air|liquid|falling_node → stone)` leaves existing stone untouched,
+and a pillar dropped from y=40 stops at the ground without Python knowing the
+terrain height.
+
+### M4 — Work units and progress
+
+1. `plan.lua` (pure): partition `bounds` into disjoint mapblock-aligned units,
+   and for a given unit return the ops clipped to it, in original order — the
+   algorithm in "Ordering and work units" above. One unit per emerge/VM cycle.
+2. Progress reports, which also renew `heartbeat_at`.
+3. The recovery protocol, minus retry: persist the current job id in
+   `core.get_mod_storage()` and report `abandoned` on startup. `interrupted` is
+   terminal at this milestone; `retry` arrives with snapshots in M6.
+
+*Test first, and this is the test that matters:* a contract fixture with a shell
+op and a carve op that both **straddle a unit boundary**, asserting that
+unit-major execution produces the same world as the op-major reference
+semantics. Write the reference implementation — it's a dozen lines — and compare
+against it, rather than hand-writing the expected world. The failure this
+catches is walking the op list out of order within a unit, which only shows at
+unit seams.
+
+Since nobody else is on this server, size units for memory and emerge throughput,
+not for latency — start around 5×5×5 mapblocks (80³ nodes) and measure. Add a
+configurable per-step budget only if you find yourself wanting to watch it build.
+
+**Done when** a 400-node-long job completes across many server steps, progress
+rows advance in SQLite, and `kill -9` on the server mid-job leaves an
+`interrupted` row naming the right job, with the mod cleanly picking up new work
+on restart rather than trying to continue.
+
+### M5 — `survey`
+
+A read-only job returning, per column in a region, the surface height and the
+first solid node — enough for Python to plan tunnels, bridges and pillar depths.
+Downsample on the Lua side; a 4×1000 road strip is a few thousand columns.
+
+**Done when** Python can fetch a profile along a route and print where it would
+need to tunnel.
+
+### M6 — Snapshot and undo
+
+Between reading a unit's region and writing it back, serialise that unit's
+`data` **and `param2`** arrays to `snapshots/{job_id}/{unit_index}.bin`. One
+file per unit, not one per job — a job has many units and they must not
+overwrite each other. Restore replays the present files in reverse index order.
+
+#### Content ids are not durable — the file must be self-describing
+
+Content ids are runtime identifiers assigned at registration time and depend on
+the mod set and registration order. They are **not** stable across a server
+restart, and recovery spans restarts by definition, so a snapshot storing raw
+`data` ids can silently restore the wrong nodes after any mod change.
+
+So the file carries its own id→name table, and ids are rewritten to be
+file-local:
+
+```text
+header:  format version
+         name table: ["air", "mcl_core:stone", "mcl_core:dirt", …]
+body:    data   — indices into that table, one per node
+         param2 — raw bytes, unchanged
+```
+
+On write, scan the unit for its distinct content ids, emit the name table, and
+store local indices. On restore, resolve each name through `core.get_content_id`
+against the *current* registry and build a remap array, then translate the body.
+
+Two things fall out of this. It is also the compression fix: a unit of natural
+terrain holds a few dozen distinct nodes, so local indices fit in one byte where
+raw ids need two — record the index width in the header and pick it at write
+time. And **if any recorded name is no longer registered, fail the restore job**
+with `unknown_node` and the list of missing names. Never substitute air; a
+half-correct restore is worse than a refused one, because you would not notice.
+
+`param2` needs no remapping — it is per-node raw data. It is only meaningful
+against the node definition it was written for, which the name check already
+guards.
+
+#### The snapshot rule
+
+**A unit's snapshot file is written at most once, ever, and never overwritten.**
+Note *unit*, not directory — that distinction is the whole rule:
+
+- Reaching a unit that already has a snapshot file: skip snapshotting, apply
+  normally. The existing file describes pre-job state and must be preserved.
+- Reaching a unit with no snapshot file: snapshot it, even mid-retry.
+
+The second case is what a directory-level rule gets wrong. An attempt that died
+after unit 3 leaves units 4…n unsnapshotted; if the retry suppressed snapshotting
+wholesale, it would modify those units with no record of their original state and
+`undo` could never restore them. Per-unit, the two attempts between them cover
+every unit either one touched.
+
+#### Commit protocol
+
+Ordering is read → snapshot → apply → write, and the snapshot step must be
+atomic against a `kill -9`. Without atomicity a truncated file looks committed,
+so a retry skips that unit and a later `undo` restores garbage over it. Per unit:
+
+1. Write to `{unit_index}.bin.tmp`, flush, close.
+2. Atomically rename to `{unit_index}.bin`.
+3. Only then `vm:write_to_map()`.
+
+Luanti's `core.safe_file_write` is write-temp-then-rename internally, so steps 1
+and 2 should come free — confirm that before relying on it. Ignore and clean up
+stray `.tmp` files on startup; they are by definition uncommitted.
+
+**Derive the manifest from the directory, don't maintain one.** The committed set
+is exactly the `.bin` files present, and unit bounds are recomputable by re-running
+`plan.lua`'s partitioner, which is pure and deterministic. That removes the
+second atomicity problem — a manifest update racing the snapshot write — because
+there is no per-unit manifest update to make. Write `manifest.json` **once at job
+start**, recording `bounds`, unit size, and partitioner version, so bounds stay
+reconstructible even if `plan.lua` changes later. It is a header, not a log.
+
+With that, the crash cases are: killed between snapshot and write — the file
+describes an unmodified region, restoring it is a harmless no-op; killed after
+the write — the file is exactly the pre-write state; killed mid-`.tmp` — no
+commit, and no world change either. Every region any attempt modified has a
+snapshot.
+
+`param2` is not optional: it carries facedir and wallmounted rotation, and plant
+and leaf variants. Content ids alone lose all of it. `param1` is deliberately
+skipped — it is lighting, which we do not maintain during builds anyway, so a
+restored `param1` would be no more correct than a recomputed one.
+
+**What undo does not restore:** node metadata, inventories, and node timers.
+Scanning a large region for metadata is expensive and raw terrain has none. So
+the promise is *"restores node type and orientation"*, not "byte-identical". If
+you build over an existing structure containing chests or machines, undo returns
+the nodes and loses their contents. For a solo authoring tool that is a fine
+trade — but it is a convenience, not a transactional guarantee, and the docs and
+the MCP tool description should both say so.
+
+`POST /v1/jobs/{id}/undo` enqueues a restore job. `POST /v1/jobs/{id}/retry`
+becomes available here too, defined as restore-then-re-run per "Recovery, by
+milestone". Snapshot directories are referenced by path from the job row, so
+pruning is `rm -r`.
+
+#### The oracle for these tests
+
+`survey` is the wrong instrument here: it reports per-column surface height and
+first solid node, so it cannot see `param2` at all, nor anything inside a sealed
+chamber. Undo's whole promise is node type **and orientation**, and survey
+observes neither directly.
+
+So the integration test mod reads the region itself with VoxelManip and compares
+`data` and `param2` element-wise, before the build and after the undo. Compare
+`data` by **node name**, not by content id — map through
+`core.get_name_from_content_id` before hashing. The kill-and-restart cases cross
+a server restart, which is precisely when ids are allowed to move; a test that
+compares raw ids would pass for the wrong reason and would miss the bug the name
+table exists to prevent.
+
+**Done when** all of these hold, each asserted with that comparison:
+
+- you build a chamber over sloped terrain containing deliberately rotated nodes
+  (facedir stairs, wallmounted torches), undo it, and the region matches
+  element-wise on both `data` and `param2`;
+- a `kill -9` partway through a **multi-unit** job, followed by `retry`, produces
+  the same region as an uninterrupted run;
+- `undo` after that retry restores the **whole** bounds — including the units the
+  first attempt never reached, which is the case the per-unit rule exists for;
+- killing the server repeatedly at random points and retrying each time still
+  ends with a correct `undo`. This is the one worth automating: a loop that kills
+  at a random tick, retries, and finally undoes, asserting against the pre-build
+  region capture.
+
+### M7 — Geometry compiler and intent tools
+
+Now the Python side earns its keep: `road`, `corridor`, `chamber`, `shaft`,
+`stairs` → ordered box lists, using survey data to decide tunnel spans and pillar
+depths. Property-based tests as described above. MCP tools at this level are what
+you'll actually talk to.
+
+**Done when** "build a road from A to B" produces a road that tunnels through
+hills and bridges valleys without you specifying either.
+
+### M8 — Lighting repair
+
+`fix_light(p1, p2)` as its own job type, run on demand over regions that touched
+daylight. Never inline in a build.
+
+**Done when** a surface road section renders with correct shadow after an
+explicit repair job, and builds are no slower than before.
+
+## Deliberately deferred
+
+Parallel jobs. Protection checks. Cancellation. Fine-grained checkpointing.
+Postgres. A semantic room/complex model. `place_schematic`. Anything that isn't
+a box.
+
+## To verify before relying on it
+
+**Resolved in M0** (see `tests/integration/README.md`):
+
+- ✅ The custom macOS build supports `--server`. Map backends: `dummy`,
+  `postgresql`, `sqlite3`.
+- ✅ `core.safe_file_write` and `core.get_dir_list` work from a **non-trusted**
+  mod, writing into the world path. M6 snapshots can be written by the mod
+  directly; they do not need to be shipped over HTTP to Python.
+- ⚠️ Homebrew's `lua` is 5.5, which is not what Luanti runs. The Lua toolchain is
+  installed against **LuaJIT (5.1)** into a project-local `.luarocks/` tree, so
+  unit tests exercise the same semantics as the engine. See
+  `scripts/lua-env.sh`.
+
+**Still open:**
+
+- Whether Mapserver's renderer ignores light values, which decides how much M8
+  matters.
+- `VoxelManip:calc_lighting`'s `propagate_shadow` argument and the deprecation
+  status of the `write_to_map(light)` parameter in 5.16 — check the bundled
+  `lua_api.md`, not older Minetest documentation.
+- Whether `core.get_dir_list` and `core.safe_file_write` are usable for snapshot
+  storage from a non-trusted mod, or whether snapshots need to go back over HTTP
+  to Python. If the latter, M6 gets bigger; plan for it.
+- Whether `core.safe_file_write` really is write-temp-then-atomic-rename, since
+  M6's commit protocol leans on it. If it isn't, do the temp-and-rename by hand
+  with `os.rename`, which is atomic within a filesystem.
+- Snapshot volume before committing to M6's storage model. With byte-wide local
+  indices, `data` plus `param2` is 2 bytes per node, so an 80³ unit is ~1 MB and
+  a large complex still runs to gigabytes. Measure with a real job and decide on
+  compression and a retention limit (last N jobs) before building it.

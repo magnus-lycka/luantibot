@@ -1,0 +1,10 @@
+-- Run `busted` from mods/luantibot/. Pure modules under src/ are plain
+-- `return {...}` tables, so specs can require them by name while init.lua
+-- loads the same files with dofile inside Luanti.
+return {
+    default = {
+        lpath = "src/?.lua",
+        ROOT = { "spec" },
+        verbose = true,
+    },
+}

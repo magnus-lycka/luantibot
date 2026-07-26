@@ -1,0 +1,78 @@
+# Python tools run through `uv run` as local hooks rather than pre-commit's own
+# isolated environments, so the hook always uses the version pinned in uv.lock.
+# Lua tools run through scripts/ wrappers, which point at the project-local
+# LuaJIT rocks tree -- see scripts/lua-env.sh.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: check-toml
+      - id: check-yaml
+      - id: check-json
+
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+
+      - id: ruff-format
+        name: ruff format
+        entry: uv run ruff format
+        language: system
+        types: [python]
+
+      - id: ty
+        name: ty check
+        entry: uv run ty check
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: deptry
+        name: deptry
+        entry: uv run deptry src
+        language: system
+        pass_filenames: false
+        files: ^(src/|pyproject\.toml)
+
+      - id: bandit
+        name: bandit
+        entry: uv run bandit -c pyproject.toml -q -r src
+        language: system
+        pass_filenames: false
+        files: ^src/
+
+      - id: stylua
+        name: stylua
+        entry: stylua
+        language: system
+        types: [lua]
+
+      - id: luacheck
+        name: luacheck
+        entry: scripts/luacheck
+        language: system
+        types: [lua]
+
+      # Test suites on pre-push: small commits stay fast, nothing broken
+      # reaches the remote.
+      - id: pytest
+        name: pytest
+        entry: uv run pytest
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: busted
+        name: busted
+        entry: scripts/busted
+        language: system
+        pass_filenames: false
+        stages: [pre-push]

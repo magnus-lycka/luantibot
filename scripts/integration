@@ -1,0 +1,87 @@
+#!/bin/sh
+# Boot a headless Luanti server on a disposable world, run the assertions in
+# tests/integration/mods/luantibot_test, and report.
+#
+# The scratch world is destroyed and recreated on every run. It uses the sqlite3
+# map backend and the `flat` mapgen: disposable, and deterministic enough that
+# region comparisons in later milestones mean something.
+set -e
+
+REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
+LUANTI=${LUANTI:-$HOME/work/luanti/build-postgresql/macos/luanti.app/Contents/MacOS/luanti}
+GAMEID=${GAMEID:-mineclonia}
+TIMEOUT=${TIMEOUT:-60}
+
+RUN_DIR="$REPO_ROOT/tests/integration/run"
+WORLD="$RUN_DIR/world"
+LOGFILE="$RUN_DIR/debug.txt"
+RESULT="$WORLD/result.json"
+
+if [ ! -x "$LUANTI" ]; then
+    echo "luanti binary not found or not executable: $LUANTI" >&2
+    echo "set LUANTI=/path/to/luanti to override" >&2
+    exit 1
+fi
+
+rm -rf "$RUN_DIR"
+mkdir -p "$WORLD/worldmods"
+
+cat > "$WORLD/world.mt" <<EOF
+gameid = $GAMEID
+backend = sqlite3
+player_backend = sqlite3
+auth_backend = sqlite3
+mod_storage_backend = sqlite3
+world_name = lbtest
+load_mod_luantibot = true
+load_mod_luantibot_test = true
+EOF
+
+cat > "$WORLD/map_meta.txt" <<EOF
+mg_name = flat
+seed = 1
+[end_of_params]
+EOF
+
+ln -s "$REPO_ROOT/mods/luantibot" "$WORLD/worldmods/luantibot"
+ln -s "$REPO_ROOT/tests/integration/mods/luantibot_test" "$WORLD/worldmods/luantibot_test"
+
+echo "booting $GAMEID on $WORLD"
+"$LUANTI" --server \
+    --world "$WORLD" \
+    --config "$REPO_ROOT/tests/integration/test.conf" \
+    --logfile "$LOGFILE" \
+    --gameid "$GAMEID" &
+SERVER_PID=$!
+
+# The test mod calls request_shutdown() when it is done, so a live process past
+# the timeout means it hung rather than finished.
+elapsed=0
+while kill -0 "$SERVER_PID" 2>/dev/null; do
+    if [ "$elapsed" -ge "$TIMEOUT" ]; then
+        echo "TIMEOUT after ${TIMEOUT}s -- killing server" >&2
+        kill -9 "$SERVER_PID" 2>/dev/null || true
+        tail -30 "$LOGFILE" >&2 2>/dev/null || true
+        exit 1
+    fi
+    sleep 1
+    elapsed=$((elapsed + 1))
+done
+
+if [ ! -f "$RESULT" ]; then
+    echo "server exited without writing $RESULT" >&2
+    tail -40 "$LOGFILE" >&2 2>/dev/null || true
+    exit 1
+fi
+
+echo "--- result ---"
+cat "$RESULT"
+echo
+
+if grep -q '"failures": *0' "$RESULT" || grep -q '"failures":0' "$RESULT"; then
+    echo "integration OK"
+    exit 0
+fi
+
+echo "integration FAILED" >&2
+exit 1
