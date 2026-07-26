@@ -543,31 +543,43 @@ it isn't.
 Each has a **Done when** you can actually check. Don't start the next one until
 it passes.
 
-### M0 — Skeleton and tooling
+### ✅ M0 — Skeleton and tooling — DONE
+
+*Delivered in `0f724ce`.*
 
 No functionality. The goal is that both test suites run and pre-commit is green,
 so every later step has somewhere to put its test.
 
-1. `uv init`, add dependencies, commit `uv.lock`.
-2. `pyproject.toml` config, one trivial passing pytest.
-3. Install luarocks/busted/luacheck/stylua. `.luacheckrc`, `.stylua.toml`, one
-   trivial passing busted spec.
-4. `.pre-commit-config.yaml`, `pre-commit install --install-hooks`,
+1. ✅ `uv init`, add dependencies, commit `uv.lock`.
+2. ✅ `pyproject.toml` config, one trivial passing pytest.
+3. ✅ Install luajit/luarocks/busted/luacheck/stylua. `.luacheckrc`,
+   `.stylua.toml`, one trivial passing busted spec.
+4. ✅ `.pre-commit-config.yaml`, `pre-commit install --install-hooks`,
    `pre-commit install --hook-type pre-push`.
-5. Create the scratch world and confirm the custom Luanti build starts headless
-   and shuts down on command. Note the exact binary path and flags in
+5. ✅ Create the scratch world and confirm the custom Luanti build starts
+   headless and shuts down on command. Documented in
    `tests/integration/README.md`.
 
 **Done when** `pre-commit run --all-files` is clean, `uv run pytest` and
 `busted` both pass, and you have a one-line command that boots and stops a
-scratch server.
+scratch server. — *All met: 14 hooks clean, 1 pytest, 3 busted,
+`./scripts/integration` boots, asserts and shuts down.*
+
+Two things came out differently than written:
+
+- **LuaJIT, not Homebrew `lua`.** Homebrew ships 5.5; Luanti embeds 5.1. Tools
+  are installed against LuaJIT into a project-local `.luarocks/` tree and run
+  via `./scripts/busted` and `./scripts/luacheck`. See "Lua toolchain".
+- **The M6 file-writing question got answered early**, by folding a probe into
+  the M0 harness. `core.safe_file_write` and `core.get_dir_list` work from a
+  non-trusted mod, so M6 snapshots stay on the Lua side.
 
 ### M1 — Emerge, end to end
 
 The whole pipeline with the one operation that cannot damage anything. Nothing
 here writes a node.
 
-**1.1 — Mod loads and emerges via chat command.**
+**1.1 — Mod loads and emerges via chat command.** ✅ **DONE**
 `mod.conf` with `name = luantibot`. `world.lua` exposes
 `emerge(p1, p2, on_done)` wrapping `core.emerge_area`; completion is the
 callback invocation with `calls_remaining == 0`, and any callback with action
@@ -577,6 +589,18 @@ callback invocation with `calls_remaining == 0`, and any callback with action
 *Test first:* a busted spec for `plan.lua` that converts a centre+radius into a
 mapblock-aligned `(p1, p2)` pair. That's the pure part. Then verify the chat
 command by hand on the scratch world and watch `debug.txt`.
+
+> **Emerge callbacks do not run on the main thread.** Verified against 5.16.1
+> source: `EmergeThread::runCompletionCallbacks` invokes the Lua callback from
+> the emerge worker thread, and `LuaEmergeAreaCallback` takes a
+> `Server::EnvAutoLock` around it. So the callback is *serialised* against the
+> server step, but it is not *on* it, and any work done inline holds the
+> environment lock for its whole duration.
+>
+> This shapes M2 and M4: the emerge callback must only record "unit N is ready"
+> and return. The VoxelManip read/apply/write belongs in a globalstep on the
+> main thread, which is where the plan's per-unit state machine was going
+> anyway. Do not do map work inside the emerge callback.
 
 **1.2 — Service with an in-memory queue.**
 `POST /v1/jobs`, `GET /v1/workers/{id}/jobs/next` returning 200 or 204,

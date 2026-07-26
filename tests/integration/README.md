@@ -16,8 +16,8 @@ more cheaply by `./scripts/busted`. Run this per milestone, not per save.
 1. Deletes and recreates `tests/integration/run/` (gitignored).
 2. Writes a `world.mt` using the **sqlite3** map backend, so the scratch world is
    a throwaway file and never touches PostgreSQL or `Marduk1`.
-3. Writes a `map_meta.txt` selecting the **flat** mapgen — deterministic, so
-   region comparisons in M2 and M6 mean something, and fast to emerge.
+3. Copies `test.conf` and appends `mg_name` / `fixed_map_seed`, letting the
+   engine create the world.
 4. Symlinks `mods/luantibot` and `tests/integration/mods/luantibot_test` into the
    world's `worldmods/`.
 5. Boots `luanti --server` on port 30001.
@@ -26,11 +26,25 @@ more cheaply by `./scripts/busted`. Run this per milestone, not per save.
 
 ## Environment
 
-| Variable  | Default                                                            |
-|-----------|--------------------------------------------------------------------|
-| `LUANTI`  | `~/work/luanti/build-postgresql/macos/luanti.app/Contents/MacOS/luanti` |
-| `GAMEID`  | `mineclonia`                                                       |
-| `TIMEOUT` | `60` seconds                                                       |
+- `LUANTI` — path to the server binary. Defaults to
+  `~/work/luanti/build-postgresql/macos/luanti.app/Contents/MacOS/luanti`.
+- `GAMEID` — defaults to `mineclonia`.
+- `MAPGEN` — defaults to `v7`. See below.
+- `TIMEOUT` — seconds before the run is treated as hung. Defaults to `120`.
+
+## Mapgen and world creation
+
+Two traps, both hit during M1.1:
+
+- **Do not hand-write `map_meta.txt`.** A world created that way has no mapgen
+  noise parameters, and mineclonia reads them back during generation — it dies
+  on `tonumber(nil)` in `mcl_mapgen_models`, which surfaces as every mapblock
+  emerging as `EMERGE_ERRORED`/`CANCELLED`. Set the mapgen in the config and let
+  the engine write a complete `map_meta.txt` when it creates the world.
+- **`v7` is the only mapgen that works here.** `flat` crashes mineclonia's
+  levelgen, and `singlenode` hangs it during stronghold placement. `v7` with a
+  fixed seed is deterministic, which is what M2 and M6 region comparisons need,
+  and it matches the real world's generator.
 
 ## Confirmed against this build (Luanti 5.16.1)
 

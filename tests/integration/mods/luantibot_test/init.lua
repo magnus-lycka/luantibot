@@ -19,6 +19,56 @@ local function check(name, ok, detail)
     end
 end
 
+-- Asynchronous checks resolve through this: each one registered here must call
+-- finish() exactly once, and the run only completes when all have.
+local pending = 0
+local on_all_done = nil
+
+local function async(fn)
+    pending = pending + 1
+    fn(function()
+        pending = pending - 1
+        if pending == 0 and on_all_done then
+            on_all_done()
+        end
+    end)
+end
+
+local function check_emerge(done)
+    local centre = { x = 100, y = 8, z = 100 }
+    local p1, p2 = luantibot.plan.emerge_bounds(centre, 8)
+    check("emerge_bounds returns a box", p1 ~= nil, p2)
+    if not p1 then
+        return done()
+    end
+
+    local expected = luantibot.plan.block_count(p1, p2)
+    local started = core.get_us_time()
+
+    luantibot.world.emerge(p1, p2, function(result)
+        local ms = (core.get_us_time() - started) / 1000
+        check("emerge succeeds", result.ok, result.error)
+        -- The tracker counts engine callbacks; plan.block_count predicts them
+        -- from geometry. If these disagree, one of the two is wrong.
+        check(
+            "emerge reports one callback per mapblock",
+            result.blocks == expected,
+            string.format("expected %d, got %d", expected, result.blocks)
+        )
+        core.log(
+            "action",
+            string.format("[luantibot_test] emerged %d blocks in %d ms", result.blocks, ms)
+        )
+
+        -- Emerged means the map is loaded, so nodes must now read as something
+        -- other than "ignore".
+        local node = core.get_node({ x = centre.x, y = centre.y, z = centre.z })
+        check("emerged area reads a real node", node.name ~= "ignore", node.name)
+
+        done()
+    end)
+end
+
 local function run_checks()
     check("mod loaded", luantibot ~= nil, "global luantibot table missing")
 
@@ -26,6 +76,12 @@ local function run_checks()
         "wire format exposed",
         luantibot and luantibot.version and luantibot.version.FORMAT == 1,
         "unexpected format version"
+    )
+
+    check(
+        "chat command registered",
+        core.registered_chatcommands["lb_emerge"] ~= nil,
+        "lb_emerge missing"
     )
 
     -- Answers a question the plan flagged for M6: can a non-trusted mod write
@@ -42,21 +98,32 @@ local function run_checks()
         end
     end
     check("get_dir_list sees the written file", listed, "probe file not listed")
+
+    async(check_emerge)
+end
+
+local function finish()
+    core.safe_file_write(
+        core.get_worldpath() .. "/result.json",
+        core.write_json({ failures = failures, checks = results })
+    )
+    core.log("action", "[luantibot_test] done, failures=" .. failures)
+    core.request_shutdown("integration run complete")
 end
 
 core.register_on_mods_loaded(function()
     -- Defer past startup so the server is fully up before we assert or shut down.
     core.after(0.5, function()
+        on_all_done = finish
+
         local ok, err = pcall(run_checks)
         if not ok then
             check("harness", false, err)
         end
 
-        core.safe_file_write(
-            core.get_worldpath() .. "/result.json",
-            core.write_json({ failures = failures, checks = results })
-        )
-        core.log("action", "[luantibot_test] done, failures=" .. failures)
-        core.request_shutdown("integration run complete")
+        -- Nothing asynchronous was registered, or it all resolved synchronously.
+        if pending == 0 then
+            finish()
+        end
     end)
 end)

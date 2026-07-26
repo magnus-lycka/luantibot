@@ -2,15 +2,20 @@
 # Boot a headless Luanti server on a disposable world, run the assertions in
 # tests/integration/mods/luantibot_test, and report.
 #
-# The scratch world is destroyed and recreated on every run. It uses the sqlite3
-# map backend and the `flat` mapgen: disposable, and deterministic enough that
-# region comparisons in later milestones mean something.
+# The scratch world is destroyed and recreated on every run, on the sqlite3 map
+# backend, so it is a throwaway file that never touches PostgreSQL or Marduk1.
+#
+# Mapgen is v7 with a fixed seed: deterministic, so region comparisons in later
+# milestones mean something, and it matches the real world's generator. The
+# other candidates do not work with mineclonia -- `flat` crashes its levelgen,
+# and `singlenode` hangs it during stronghold placement.
 set -e
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 LUANTI=${LUANTI:-$HOME/work/luanti/build-postgresql/macos/luanti.app/Contents/MacOS/luanti}
 GAMEID=${GAMEID:-mineclonia}
-TIMEOUT=${TIMEOUT:-60}
+MAPGEN=${MAPGEN:-v7}
+TIMEOUT=${TIMEOUT:-120}
 
 RUN_DIR="$REPO_ROOT/tests/integration/run"
 WORLD="$RUN_DIR/world"
@@ -37,10 +42,16 @@ load_mod_luantibot = true
 load_mod_luantibot_test = true
 EOF
 
-cat > "$WORLD/map_meta.txt" <<EOF
-mg_name = flat
-seed = 1
-[end_of_params]
+# Do NOT hand-write map_meta.txt. A world created that way is missing every
+# mapgen noise parameter, and games that read them back (mineclonia does) crash
+# on nil during generation. Instead, set the mapgen in the config and let the
+# engine write a complete map_meta.txt when it creates the world.
+CONF="$RUN_DIR/server.conf"
+cp "$REPO_ROOT/tests/integration/test.conf" "$CONF"
+cat >> "$CONF" <<EOF
+
+mg_name = $MAPGEN
+fixed_map_seed = 1
 EOF
 
 ln -s "$REPO_ROOT/mods/luantibot" "$WORLD/worldmods/luantibot"
@@ -49,7 +60,7 @@ ln -s "$REPO_ROOT/tests/integration/mods/luantibot_test" "$WORLD/worldmods/luant
 echo "booting $GAMEID on $WORLD"
 "$LUANTI" --server \
     --world "$WORLD" \
-    --config "$REPO_ROOT/tests/integration/test.conf" \
+    --config "$CONF" \
     --logfile "$LOGFILE" \
     --gameid "$GAMEID" &
 SERVER_PID=$!
