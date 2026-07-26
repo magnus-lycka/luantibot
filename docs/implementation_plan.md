@@ -392,6 +392,7 @@ independently.
 {
   "format": 1,
   "job_id": 173,
+  "world_id": 3,
   "world": "Marduk1",
   "palette": ["air", "mcl_core:stonebrick", "mcl_core:stone"],
   "bounds": {"min": [-6000, -20, -5500], "max": [-5800, 30, -5350]},
@@ -466,6 +467,90 @@ Three things break that equivalence, and only these three:
 Reporting endpoints as in [suggestion_chatgpt.md](suggestion_chatgpt.md#L120):
 `GET /v1/workers/{id}/jobs/next`, `POST /v1/jobs/{id}/{started,progress,completed,failed}`,
 plus `abandoned` from M4 and `undo` / `retry` from M6.
+
+## World identity
+
+Builds are permanent and world-scoped: "what did I build, and in which world"
+must stay answerable for the life of the project. Coordinates repeat across
+worlds, so build history is meaningless without a durable world identity —
+and neither the Luanti world name nor the directory name is durable, since
+both can be renamed.
+
+So the service owns identity and the mod caches it:
+
+```sql
+CREATE TABLE world (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    name       TEXT NOT NULL UNIQUE,   -- display label, changeable
+    created_at TEXT NOT NULL
+);
+```
+
+`job.world_id` references it. Renaming a world is one `UPDATE` and detaches
+nothing.
+
+`AUTOINCREMENT` is not decorative. Without it SQLite reuses the highest rowid
+after a delete, and we plan to prune old snapshot directories — a reused job id
+would silently attach an old snapshot to a new job, which surfaces only when an
+`undo` restores the wrong terrain.
+
+### Registration handshake
+
+The mod learns its id once and remembers it:
+
+1. On load, read `world_id` from `core.get_mod_storage()`.
+2. Absent → `POST /v1/worlds {"name": "<local world name>"}`. The service
+   returns an existing row if the name matches, or creates one. Persist the id.
+3. Present → poll `GET /v1/worlds/{world_id}/jobs/next` from then on.
+
+Mod storage is per-mod, per-world, living in `<world>/mod_storage.sqlite`. It
+travels with the world directory, which is exactly what makes the binding
+durable — and exactly why a copied world inherits its parent's identity.
+
+**Registration adopts by name.** Binding a copied world under the *same* name
+merges it into the original's history, silently. The name passed to `bind` is
+the decision; the id follows it.
+
+### Rebinding
+
+`world_id` must be changeable, or a world copy can never become a separate
+world. Three chat commands, all `server` priv, all logged:
+
+- `/lb_world` — show stored id, the service's name for it, and the local world
+  directory name.
+- `/lb_world_bind <name>` — register under `<name>` and overwrite the stored id.
+  This is what splits a copy off: `cp -r Marduk1 Marduk1_v2`, boot it, then
+  `/lb_world_bind Marduk1_v2`.
+- `/lb_world_forget` — clear the id; re-register on next start.
+
+Two safeguards, because everything that goes wrong here goes wrong silently:
+
+- **Log identity on every startup**: `[luantibot] world_id=3 "Marduk1"
+  (dir: Marduk1)`.
+- **Warn, do not refuse, on divergence** between the service's name and the
+  local directory name. A legitimate rename and an accidental copy look
+  identical at that instant, so refusing would break the legitimate case.
+
+### Routing and the world check
+
+Two layers, deliberately:
+
+1. **The service never offers a foreign job.** Reservation filters on
+   `world_id`, so cross-world execution is structurally impossible rather than
+   something the mod must catch in time. One Luanti server hosts one world, so
+   server ≡ world — there is no separate "worker" concept.
+2. **The mod asserts anyway**, before any node is touched. A mismatch means
+   misconfiguration, so it fails the job with `wrong_world` and reports it. It
+   does **not** return the job to the queue: that would fetch and reject the
+   same job forever.
+
+Job submission takes a world *name* and resolves it; the document handed to the
+mod carries `world_id` for matching and `world` for logging. Names for humans,
+ids for machines.
+
+Until the mod-side check lands, the only thing protecting a real world is that
+the mod is not installed in it. That is a deployment fact, not an invariant, and
+it stops being sufficient the moment `fill_box` exists.
 
 ## Crash recovery protocol
 
@@ -602,25 +687,77 @@ command by hand on the scratch world and watch `debug.txt`.
 > main thread, which is where the plan's per-unit state machine was going
 > anyway. Do not do map work inside the emerge callback.
 
-**1.2 — Service with an in-memory queue.**
+**1.2 — Service with an in-memory queue.** ✅ **DONE**
 `POST /v1/jobs`, `GET /v1/workers/{id}/jobs/next` returning 200 or 204,
-`POST /v1/jobs/{id}/completed`, `POST /v1/jobs/{id}/failed`.
+`POST /v1/jobs/{id}/completed`, `POST /v1/jobs/{id}/failed`. Also `started`
+(from the wire contract) and `GET /v1/jobs/{id}` for inspection.
 
 *Test first:* API tests for submit → fetch → complete, fetch-when-empty → 204,
 and fetching twice reserves only once.
 
-**1.3 — SQLite behind the same API.**
-Schema per the earlier discussion: `job(id, created_at, state, intent_json,
-ops_json, bbox_min_x…bbox_max_z, heartbeat_at, started_at, finished_at,
-units_done, units_total, error_code, error_msg, snapshot_path)`. WAL mode.
-Reservation is a single `UPDATE … WHERE state='queued' … RETURNING`. Implement
-step 3 of the recovery protocol here — the service-startup sweep of stale
-`running` rows. `abandoned` waits until M4, when there is work long enough to be
+Delivered as `ops.py` (Pydantic wire models), `service/store.py` (`Store`
+protocol + `InMemoryStore`) and `service/app.py`. 21 API tests. Notes:
+
+- **Models are `extra="forbid"`.** A typo'd key in a job document must fail
+  loudly rather than be silently dropped, or the build quietly does something
+  other than what was asked. `Vec3 = tuple[int, int, int]` also rejects floats
+  and non-finite values at parse time, so they can never reach `emerge_area`.
+- **Reserved ≠ started.** Reservation is the service handing work out; `started`
+  is the mod confirming it began. The gap is what distinguishes "died before
+  starting" from "died mid-job" after a crash, which M4 needs.
+- **Reporting on a job that isn't `running` is 409**, not a silent no-op — that
+  is a stale report from a restarted mod, or a double report, and neither should
+  mutate state.
+- The store is a `Protocol`, so M1.3 swaps SQLite in underneath without the API
+  or its tests changing. Only `tests/api/conftest.py` knows which store is live.
+
+**1.3 — SQLite behind the same API.** ✅ **DONE**
+Two tables. `world` per "World identity" above, and
+`job(id, world_id, created_at, state, intent_json, ops_json,
+bbox_min_x…bbox_max_z, heartbeat_at, started_at, finished_at, units_done,
+units_total, error_code, error_msg, snapshot_path)`, both `AUTOINCREMENT`.
+WAL mode, one writer.
+
+`world_id` and the bbox are **columns, not JSON**, because "what did I build
+around here in Marduk1" is the query the whole history exists to answer:
+
+```sql
+SELECT * FROM job WHERE world_id = ? AND state = 'completed'
+  AND bbox_min_x <= ? AND bbox_max_x >= ? ...
+```
+
+Add `POST /v1/worlds` (register, adopting by name) and `GET /v1/worlds`.
+Reservation becomes world-scoped and is a single
+`UPDATE … WHERE world_id = ? AND state='queued' … RETURNING`. Implement step 3
+of the recovery protocol here — the service-startup sweep of stale `running`
+rows. `abandoned` waits until M4, when there is work long enough to be
 interrupted; `retry` until M6, when there is a snapshot to restore from.
 
-*Test first:* the M1.2 API tests must pass unchanged against the new store —
-that's the proof the API doesn't leak the schema. Then add tests for the startup
-sweep and for double-reservation under a repeated call.
+*Test first:* the M1.2 API tests must pass against the new store with only the
+storage fixture changed — that's the proof the API doesn't leak the schema.
+Then add tests for registration, world-scoped reservation, the startup sweep,
+and double-reservation under a repeated call.
+
+> The endpoint moves from `/v1/workers/{worker}/…` to `/v1/worlds/{world_id}/…`
+> and `worker` disappears — it was always the world. That is a deliberate
+> contract change, not schema leakage, made while the contract has no users.
+
+Delivered as `schema.sql`, `SqliteStore` beside `InMemoryStore`, and the world
+endpoints. 37 Python tests. The criterion held: all 21 M1.2 job tests passed
+against SQLite with only `conftest.py` changed. Notes:
+
+- **The store takes a lock, and that is the design.** FastAPI runs sync handlers
+  on a threadpool, so `check_same_thread=False` plus an `RLock` around every
+  operation. "One writer" is the claim the recovery model rests on; the lock is
+  what makes it true rather than aspirational. WAL is on so a separate
+  read-only connection can inspect a live database without blocking it.
+- **`stale_after` is injectable** on both stores. The startup-sweep test then
+  exercises the real production path — construct with a zero window, restart,
+  observe `interrupted` — instead of reaching into the database to backdate a
+  heartbeat, or adding a mutator that exists only for tests.
+- **No `assert` for narrowing.** `_parse_required` raises, because asserts are
+  stripped under `python -O` and a NULL in a NOT NULL column means the schema
+  and the code disagree, which should be loud.
 
 **1.4 — Lua polls over HTTP.**
 `local http = core.request_http_api()` at the **top level** of `init.lua` — it
@@ -628,6 +765,20 @@ returns nil if called later or if the mod isn't in `secure.http_mods`. Use
 `core.parse_json` / `core.write_json`; you do not need dkjson. A globalstep
 accumulates `dtime` and fetches every ~2s when idle, immediately after a
 completed job.
+
+Also the mod side of "World identity": the registration handshake against
+`core.get_mod_storage()`, `/lb_world`, `/lb_world_bind`, `/lb_world_forget`, and
+the startup identity log.
+
+And **rule 2 of the wire contract, brought forward from M2**: compare the job's
+`world_id` against the stored one and fail with `wrong_world` on mismatch. It
+belongs here rather than in M2 because M1.4 is the first milestone where the mod
+executes work it did not originate, and M2 is the first that writes nodes — the
+guard has to exist before the thing it guards against.
+
+Plus a fail-closed `luantibot_world` setting checked against the local world
+directory name, so a mod installed globally rather than per-world does nothing
+until deliberately armed.
 
 *Test first:* busted specs for `poll.lua`'s state machine with an injected fake
 `http` — idle → job → running → report → idle, plus what happens when the

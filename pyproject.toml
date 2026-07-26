@@ -9,7 +9,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.140.0",
-    "httpx>=0.28.1",
+    "httpx2>=2.9.1",
     "mcp>=1.28.1",
     "pydantic>=2.13.4",
     "uvicorn>=0.51.0",
@@ -41,15 +41,17 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
+# Warnings are errors: deprecations from FastAPI/Starlette/Pydantic should be
+# dealt with when they appear, not discovered during a major upgrade.
+filterwarnings = ["error"]
 
 [tool.bandit]
 exclude_dirs = ["tests"]
 
 [tool.deptry.per_rule_ignores]
-# Declared at M0 per the plan, imported as the milestones land. Delete each
-# entry when the corresponding module starts importing it.
-#   fastapi, pydantic  -> M1.2 (service)
-#   httpx              -> M1.2 (API tests) and M1.5 (MCP client)
-#   mcp                -> M1.5
-#   uvicorn            -> never imported; invoked as a server
-DEP002 = ["fastapi", "httpx", "mcp", "pydantic", "uvicorn"]
+# Declared ahead of use; delete each entry when src/ starts importing it.
+#   httpx2   -> M1.5 (MCP server is an HTTP client of the service).
+#              Also what starlette's TestClient uses in the API tests.
+#   mcp      -> M1.5
+#   uvicorn  -> never imported; invoked as a server
+DEP002 = ["httpx2", "mcp", "uvicorn"]
