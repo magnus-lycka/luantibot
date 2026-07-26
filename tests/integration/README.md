@@ -29,7 +29,8 @@ more cheaply by `./scripts/busted`. Run this per milestone, not per save.
 - `LUANTI` — path to the server binary. Defaults to
   `~/work/luanti/build-postgresql/macos/luanti.app/Contents/MacOS/luanti`.
 - `GAMEID` — defaults to `mineclonia`.
-- `MAPGEN` — defaults to `v7`. See below.
+- `MAPGEN` — defaults to `carpathian`. See below.
+- `SEED` — defaults to `650101`. See below.
 - `TIMEOUT` — seconds before the run is treated as hung. Defaults to `120`.
 
 ## Mapgen and world creation
@@ -41,10 +42,18 @@ Two traps, both hit during M1.1:
   on `tonumber(nil)` in `mcl_mapgen_models`, which surfaces as every mapblock
   emerging as `EMERGE_ERRORED`/`CANCELLED`. Set the mapgen in the config and let
   the engine write a complete `map_meta.txt` when it creates the world.
-- **`v7` is the only mapgen that works here.** `flat` crashes mineclonia's
-  levelgen, and `singlenode` hangs it during stronghold placement. `v7` with a
-  fixed seed is deterministic, which is what M2 and M6 region comparisons need,
-  and it matches the real world's generator.
+- **Mapgen and seed match the real world.** `Marduk1` is `carpathian` /
+  `650101`, so the harness uses the same. Test terrain is then representative of
+  what the builder will actually meet — real hills to tunnel through in M3 and
+  M5 — rather than something the code only works against by accident.
+
+  Verified deterministic: two consecutive runs both probe
+  `(100,8,100) = mcl_core:diorite`. That repeatability is what M2 and M6 region
+  comparisons rest on, and the probe is logged on every run so a regression in
+  it is visible rather than silent.
+
+  Do not substitute the other mapgens: `flat` crashes mineclonia's levelgen and
+  `singlenode` hangs it during stronghold placement.
 
 ## Confirmed against this build (Luanti 5.16.1)
 

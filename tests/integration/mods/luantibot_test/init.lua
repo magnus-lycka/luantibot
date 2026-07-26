@@ -61,9 +61,21 @@ local function check_emerge(done)
         )
 
         -- Emerged means the map is loaded, so nodes must now read as something
-        -- other than "ignore".
+        -- other than "ignore". The name is logged because a fixed mapgen seed
+        -- should make it identical on every run -- the determinism that M2 and
+        -- M6 region comparisons rest on.
         local node = core.get_node({ x = centre.x, y = centre.y, z = centre.z })
         check("emerged area reads a real node", node.name ~= "ignore", node.name)
+        core.log(
+            "action",
+            string.format(
+                "[luantibot_test] probe (%d,%d,%d) = %s",
+                centre.x,
+                centre.y,
+                centre.z,
+                node.name
+            )
+        )
 
         done()
     end)
