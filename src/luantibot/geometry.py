@@ -19,6 +19,13 @@ MAX_MAPBLOCKS = 4096
 own configurable cap; this exists so an obviously oversized job is refused
 before it is ever queued."""
 
+MAPGEN_CHUNK = 80
+"""Nodes along one edge of a mapgen chunk (5 mapblocks, Luanti's default).
+
+Generation happens a whole chunk at a time, which is why a thin slab is not
+cheap: asking for 16 nodes of height still generates all 80. Cost tracks chunks
+touched, not mapblocks -- see `mapgen_chunks`."""
+
 Vec3 = tuple[int, int, int]
 
 
@@ -52,6 +59,30 @@ def cube(center: Vec3, radius: int) -> tuple[Vec3, Vec3]:
         (x - radius, y - radius, z - radius),
         (x + radius, y + radius, z + radius),
     )
+
+
+def mapgen_chunks(lo: Vec3, hi: Vec3) -> int:
+    """Mapgen chunks a box touches -- the quantity that actually predicts time.
+
+    `mapblock_count` is the right unit for the *cap* (it is what the mod's
+    VoxelManip handles), but it badly mispredicts *duration* for flat boxes: a
+    1024x1024x16 slab and a 1024x1024x80 one are 4096 and 20480 mapblocks, yet
+    cost the same, because both generate one chunk of height.
+
+    Counts partially covered chunks, since generation cannot do less than one.
+
+    This predicts far better than mapblocks across shapes, but it is not
+    precise: two runs of an identical 1024x1024x16 slab took 74.5s and 109.3s,
+    so roughly 0.5s/chunk with 50% spread is as tight as the measurements
+    support. Compact boxes come in cheaper per touched chunk (~0.23s) because
+    more of their chunks are only clipped at the edges. Treat any estimate built
+    on this as an order of magnitude, not a schedule.
+    """
+    spans = [
+        (max(a, b) // MAPGEN_CHUNK) - (min(a, b) // MAPGEN_CHUNK) + 1
+        for a, b in zip(lo, hi, strict=True)
+    ]
+    return spans[0] * spans[1] * spans[2]
 
 
 def slab(center_xz: tuple[int, int], side: int, y_min: int, y_max: int) -> tuple[Vec3, Vec3]:

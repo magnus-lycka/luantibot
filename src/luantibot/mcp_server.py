@@ -43,13 +43,18 @@ def _client() -> httpx.Client:
     return httpx.Client(base_url=SERVICE_URL, timeout=10.0)
 
 
-SECONDS_PER_MAPBLOCK = 0.0043
-"""Measured on fresh terrain: 3375 mapblocks in 14.5s, so ~230 blocks/s.
+SECONDS_PER_CHUNK = 0.5
+"""Rough fit to measured slab jobs; see `geometry.mapgen_chunks` for the spread.
 
-The previous value here was 0.064 -- fifteen times too pessimistic, which made
-`emerge_area` quote four minutes for work that takes fifteen seconds. Estimates
-in tool descriptions get believed and planned against, so this one is measured
-rather than guessed."""
+Estimates in tool descriptions get believed and planned against, so this one is
+measured rather than guessed -- and measured *per mapgen chunk*, because a
+per-mapblock constant cannot fit both shapes at once. An earlier per-mapblock
+value here was fifteen times too pessimistic for cubes; refitting it to cubes
+then ran five times too optimistic for slabs. Chunks are the unit generation
+actually works in.
+
+It still only sets the order of magnitude: identical slab jobs varied by 50%,
+and compact boxes finish in about half what this predicts."""
 
 
 def _service_error(exc: Exception) -> dict[str, Any]:
@@ -122,10 +127,13 @@ def emerge_slab(world: str, x: int, z: int, side: int, y_min: int, y_max: int) -
     square in X/Z (centred on `x`,`z`) while `y_min`..`y_max` sets the height
     independently, so covering ground does not drag a tall column along with it.
 
-    Cost is mapblocks -- ceil(side/16)^2 * height_in_blocks -- and generation
-    runs at roughly 230 mapblocks/s. The 4096-mapblock ceiling means a slab one
-    mapblock tall (e.g. y_min=0, y_max=15) can be 1024 nodes square; a slab 64
-    nodes tall can be 256 square.
+    The 4096-mapblock ceiling means a slab one mapblock tall (e.g. y_min=0,
+    y_max=15) can be 1024 nodes square; a slab 64 nodes tall can be 256 square.
+
+    Time is set by mapgen chunks (80 nodes cubed) at roughly 0.55s each, NOT by
+    mapblocks. Height below 80 nodes is therefore close to free but never
+    cheaper than one chunk: y_min=0,y_max=15 costs the same as y_min=0,y_max=79.
+    Widening X/Z is what costs -- doubling `side` quadruples the time.
 
     Returns a job id immediately; check it with job_status.
     """
@@ -150,6 +158,7 @@ def _submit_emerge(
 ) -> dict[str, Any]:
     """Cap-check a mapblock-aligned box and queue it as an emerge job."""
     blocks = geometry.mapblock_count(lo, hi)
+    chunks = geometry.mapgen_chunks(lo, hi)
     if blocks > geometry.MAX_MAPBLOCKS:
         return {
             "error": (
@@ -183,7 +192,7 @@ def _submit_emerge(
         "bounds": {"min": list(lo), "max": list(hi)},
         "note": (
             "Queued. The mod picks this up within a couple of seconds; "
-            f"expect roughly {max(1, round(blocks * SECONDS_PER_MAPBLOCK))}s of generation."
+            f"expect roughly {max(1, round(chunks * SECONDS_PER_CHUNK))}s of generation."
         ),
     }
 

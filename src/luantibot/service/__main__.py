@@ -16,6 +16,7 @@ from pathlib import Path
 
 import uvicorn
 
+from luantibot.service import logconfig
 from luantibot.service.app import create_app
 from luantibot.service.store import SqliteStore
 
@@ -27,7 +28,12 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8099)
     args = parser.parse_args()
 
-    uvicorn.run(create_app(SqliteStore(args.db)), host=args.host, port=args.port)
+    uvicorn.run(
+        create_app(SqliteStore(args.db)),
+        host=args.host,
+        port=args.port,
+        log_config=logconfig.config(),
+    )
 
 
 if __name__ == "__main__":
