@@ -12,17 +12,45 @@ local version = load("version")
 local plan = load("plan")
 local emerge = load("emerge")
 local parse = load("parse")
+local identity = load("identity")
+local validate = load("validate")({ version = version })
+local poll = load("poll")
 local world = load("world")({ emerge = emerge })
+
+-- MUST be at load time. core.request_http_api() returns nil if called later,
+-- or if this mod is not listed in secure.http_mods.
+local http = core.request_http_api()
+
+local settings = core.settings
+local storage = load("storage")({ storage = core.get_mod_storage() })
+
+local LOCAL_WORLD = identity.world_name_from_path(core.get_worldpath())
+local BASE_URL = settings:get("luantibot_service_url") or "http://127.0.0.1:8080"
+local MAX_EMERGE_BLOCKS = tonumber(settings:get("luantibot_max_emerge_blocks")) or 4096
 
 luantibot = {
     version = version,
     plan = plan,
     world = world,
+    identity = identity,
+    validate = validate,
+    local_world = LOCAL_WORLD,
 }
 
--- A typo'd radius should not ask the engine to generate half a planet. The
--- real per-job cap arrives with validate.lua in M2; this guards the chat path.
-local MAX_EMERGE_BLOCKS = tonumber(core.settings:get("luantibot_max_emerge_blocks")) or 4096
+-- Fail closed. A mod installed into the global mods directory rather than one
+-- world's worldmods would otherwise be live in every world at once, including
+-- the real one.
+local armed, why = identity.armed(settings:get("luantibot_world"), LOCAL_WORLD)
+if not armed then
+    core.log("warning", "[luantibot] inactive: " .. why)
+    luantibot.armed = false
+    return
+end
+luantibot.armed = true
+
+-- Logged before the HTTP gate below, so this line appears whether or not the
+-- service is configured. It is what INSTALL.md tells people to look for.
+core.log("action", "[luantibot] loaded, wire format " .. version.FORMAT)
 
 core.register_chatcommand("lb_emerge", {
     params = "<x> <y> <z> <radius>",
@@ -78,4 +106,141 @@ core.register_chatcommand("lb_emerge", {
     end,
 })
 
-core.log("action", "[luantibot] loaded, wire format " .. version.FORMAT)
+-- Everything below needs the service. /lb_emerge above deliberately does not:
+-- it is a local operation, and must stay usable when the service is down or
+-- was never started.
+if not http then
+    core.log(
+        "warning",
+        "[luantibot] no HTTP API; /lb_emerge works but job polling is off. "
+            .. "Add 'secure.http_mods = luantibot' to minetest.conf to enable it."
+    )
+    return
+end
+
+local client = load("client")({ http = http, base_url = BASE_URL })
+local service_name = nil
+
+local poller = poll.new({
+    world_name = LOCAL_WORLD,
+    world_id = storage.world_id(),
+    interval = tonumber(settings:get("luantibot_poll_interval")) or 2,
+})
+luantibot.poller = poller
+luantibot.stats = { jobs_done = 0, jobs_failed = 0 }
+
+local function log_identity()
+    core.log(
+        "action",
+        "[luantibot] " .. identity.describe(poller:world_id(), service_name, LOCAL_WORLD)
+    )
+end
+
+-- Executes a job the service handed us, then tells the poller how it went.
+local function fail_job(job, code, message)
+    core.log("error", string.format("[luantibot] job %s failed: %s", tostring(job.job_id), message))
+    luantibot.stats.jobs_failed = luantibot.stats.jobs_failed + 1
+    poller:finish(false, { code = code, message = message })
+end
+
+local function run_job(job)
+    local ok, code, message = validate.job(job, { world_id = poller:world_id() })
+    if not ok then
+        fail_job(job, code, message)
+        return
+    end
+
+    -- M1 executes exactly one op type, and it writes nothing.
+    local op = job.ops[1]
+    if not op or op.op ~= "emerge" then
+        fail_job(job, "unknown_op", "only 'emerge' is supported at M1")
+        return
+    end
+
+    local lo, hi = job.bounds.min, job.bounds.max
+    local p1 = { x = lo[1], y = lo[2], z = lo[3] }
+    local p2 = { x = hi[1], y = hi[2], z = hi[3] }
+    local started = core.get_us_time()
+
+    core.log("action", string.format("[luantibot] job %d: emerging", job.job_id))
+
+    world.emerge(p1, p2, function(result)
+        local ms = math.floor((core.get_us_time() - started) / 1000)
+        if not result.ok then
+            fail_job(job, "emerge_failed", result.error)
+            return
+        end
+        core.log(
+            "action",
+            string.format(
+                "[luantibot] job %d: %d mapblocks in %d ms",
+                job.job_id,
+                result.blocks,
+                ms
+            )
+        )
+        luantibot.stats.jobs_done = luantibot.stats.jobs_done + 1
+        poller:finish(true, { blocks = result.blocks, ms = ms })
+    end)
+end
+
+local function handle(event)
+    if event.kind == "registered" then
+        storage.set_world_id(event.world_id)
+        log_identity()
+    elseif event.kind == "job" then
+        run_job(event.job)
+    elseif event.kind == "error" then
+        core.log("warning", "[luantibot] " .. event.message)
+    end
+end
+
+core.register_globalstep(function(dtime)
+    local req = poller:tick(dtime)
+    if req then
+        client.send(req, function(res)
+            handle(poller:on_response(res))
+        end)
+    end
+end)
+
+core.register_chatcommand("lb_world", {
+    description = "Show this server's luantibot world identity",
+    privs = { server = true },
+    func = function()
+        return true, identity.describe(poller:world_id(), service_name, LOCAL_WORLD)
+    end,
+})
+
+core.register_chatcommand("lb_world_bind", {
+    params = "<name>",
+    description = "Register this world under <name> and adopt the returned id",
+    privs = { server = true },
+    func = function(caller, param)
+        local name = (param or ""):gsub("^%s*(.-)%s*$", "%1")
+        if name == "" then
+            return false, "usage: /lb_world_bind <name>"
+        end
+        -- Binding a world *copy* under the original's name merges their
+        -- histories, silently. The name is the decision; the id follows it.
+        core.log("action", string.format("[luantibot] %s rebinding world to %q", caller, name))
+        service_name = nil
+        storage.clear()
+        poller:rebind(name)
+        return true, "rebinding to " .. name .. "; watch the log"
+    end,
+})
+
+core.register_chatcommand("lb_world_forget", {
+    description = "Forget the cached world id and re-register on the next poll",
+    privs = { server = true },
+    func = function(caller)
+        core.log("action", "[luantibot] " .. caller .. " cleared the cached world id")
+        service_name = nil
+        storage.clear()
+        poller:forget()
+        return true, "forgotten; will re-register as " .. LOCAL_WORLD
+    end,
+})
+
+log_identity()

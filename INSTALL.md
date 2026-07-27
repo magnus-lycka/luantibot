@@ -1,0 +1,274 @@
+# Installing and running luantibot
+
+Two things get installed: a **Lua mod** inside your Luanti world, and a **Python
+service** that hands it work. The mod alone is enough to use `/lb_emerge`; the
+service is only needed for jobs submitted from outside Luanti.
+
+Paths below are macOS. On Linux the Luanti data directory is `~/.minetest` or
+`~/.luanti` instead of `~/Library/Application Support/minetest`.
+
+---
+
+## 1. Install the mod into a world
+
+Symlink it into the world's `worldmods` directory, so it exists for that world
+and no other:
+
+```sh
+WORLD=~/Library/Application\ Support/minetest/worlds/Marduk1
+
+mkdir -p "$WORLD/worldmods"
+ln -s ~/work/luantibot/mods/luantibot "$WORLD/worldmods/luantibot"
+```
+
+Mods in `worldmods` are normally enabled automatically. If the log does not show
+`[luantibot] loaded`, add this to `$WORLD/world.mt`:
+
+```ini
+load_mod_luantibot = true
+```
+
+A symlink means `git pull` updates the mod; you only need to restart the server.
+
+## 2. Arm it
+
+The mod is **fail-closed**: it loads, logs `inactive:`, and registers nothing
+until you name the world it may act in. Add to
+`~/Library/Application Support/minetest/minetest.conf`:
+
+```ini
+luantibot_world = Marduk1
+```
+
+The value is the world's **directory name**, which is what appears under
+`worlds/`. It is safe to leave this in your global config — open any other world
+and the mod stays inert, because the name will not match.
+
+Start the server and check the log. Without the service configured you will see:
+
+```text
+ACTION[Main]:  [luantibot] loaded, wire format 1
+WARNING[Main]: [luantibot] no HTTP API; /lb_emerge works but job polling is off.
+```
+
+That warning is expected and harmless at this stage — `/lb_emerge` is a local
+operation and works without the service.
+
+If instead you see `[luantibot] inactive: ...`, the `luantibot_world` setting is
+missing or does not match the directory name, and nothing is registered.
+
+## 3. Optionally: the builder service
+
+Only required for jobs submitted from outside Luanti. Add to `minetest.conf`:
+
+```ini
+secure.http_mods = luantibot
+```
+
+Luanti will not give a mod outbound HTTP without this, and the handle can only
+be acquired at load time — so this needs a server restart, not a `/reload`.
+
+Then run the service:
+
+```sh
+cd ~/work/luantibot
+uv run python -m luantibot.service --db luantibot.sqlite
+```
+
+It binds to `127.0.0.1:8080` and nothing else. Nothing about this API is safe to
+expose; there is no authentication because it is not reachable off the machine.
+
+Restart Luanti. The warning about the HTTP API is gone, and on its first poll
+the mod registers itself and logs its identity:
+
+```text
+ACTION[Main]:   [luantibot] loaded, wire format 1
+ACTION[Main]:   [luantibot] unregistered (dir: Marduk1)
+ACTION[Server]: [luantibot] world_id=1 "Marduk1" (dir: Marduk1)
+```
+
+The third line is the handshake completing. From then on the id is cached in the
+world and that line appears at every startup.
+
+---
+
+## Using it
+
+### Chat commands
+
+All require the `server` privilege.
+
+| Command | Purpose |
+| --- | --- |
+| `/lb_emerge <x> <y> <z> <radius>` | Load or generate mapblocks around a point |
+| `/lb_world` | Show this server's world identity |
+| `/lb_world_bind <name>` | Re-register under `<name>` and adopt the new id |
+| `/lb_world_forget` | Drop the cached id; re-register on the next poll |
+
+`/lb_emerge` works with or without the service. The `/lb_world*` commands only
+exist when the service is configured.
+
+`radius` is in **nodes** and describes a cube, which is then expanded out to
+whole 16-node mapblocks. Cost therefore grows cubically, and faster than it
+looks — a radius of 64 is not twice the work of 32, it is nearly six times:
+
+| radius | mapblocks | rough time | |
+| --- | --- | --- | --- |
+| 8 | 8 | ~1 s | |
+| 16 | 27 | ~2 s | |
+| 32 | 125 | ~8 s | |
+| 48 | 343 | ~22 s | |
+| 64 | 729 | ~47 s | |
+| 96 | 2197 | ~2.3 min | |
+| 112 | 3375 | ~3.6 min | |
+| 128 | 4913 | — | **refused**, over the 4096 cap |
+
+So **~112 is the largest usable radius** at the default
+`luantibot_max_emerge_blocks`. Times assume roughly 64 ms per mapblock, measured
+on carpathian with mineclonia; your terrain and hardware will differ.
+
+Emerging runs on its own threads, so the server keeps responding, but it is
+CPU-heavy while it works.
+
+### Jobs over HTTP
+
+```sh
+curl -X POST localhost:8080/v1/jobs -H 'Content-Type: application/json' \
+  -d '{"format":1,"world":"Marduk1",
+       "bounds":{"min":[-5960,0,-5510],"max":[-5897,63,-5447]},
+       "ops":[{"op":"emerge"}]}'
+```
+
+Then watch it: `curl localhost:8080/v1/jobs/1`.
+
+The mod polls every couple of seconds when idle, picks the job up, executes it,
+and reports back. Endpoints:
+
+- `POST /v1/jobs` — submit; names a world, which is registered on demand
+- `GET /v1/jobs/{id}` — inspect a job
+- `GET /v1/worlds` — list known worlds
+- `POST /v1/worlds` — register or adopt a world by name
+- `GET /v1/health`
+
+The rest (`jobs/next`, `started`, `progress`, `completed`, `failed`) are the
+mod's side of the conversation and are not meant to be called by hand.
+
+---
+
+## What this does to your world
+
+**Emerging writes.** It generates mapblocks that do not exist yet and persists
+them to your map database, permanently. Mapserver will render them. It does not
+alter existing terrain — but "read-only" is the wrong mental model, and a large
+`/lb_emerge` in an unexplored region is not undoable.
+
+Nothing yet writes *nodes*. Until M2 lands, the mod can only load and generate.
+
+---
+
+## Configuration reference
+
+All in `minetest.conf`.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `luantibot_world` | *(none)* | World directory name the mod may act in. Unset means inert. |
+| `secure.http_mods` | *(none)* | Must include `luantibot` for job polling. |
+| `luantibot_service_url` | `http://127.0.0.1:8080` | Where the builder service listens. |
+| `luantibot_poll_interval` | `2` | Seconds between polls when idle. |
+| `luantibot_max_emerge_blocks` | `4096` | Mapblock cap for `/lb_emerge`. |
+
+Service flags: `--db` (default `luantibot.sqlite`), `--host` (`127.0.0.1`),
+`--port` (`8080`).
+
+---
+
+## World identity, and copied worlds
+
+The service issues each world a numeric id; the mod caches it in
+`<world>/mod_storage.sqlite`. That binding is what keeps build history attached
+to the right world, and it survives renaming the world *or* renaming it in the
+service — neither name is the identity.
+
+Because mod storage lives in the world directory, **copying a world copies its
+identity**. `cp -r Marduk1 Marduk1_v2` produces a second world claiming to be
+world 1. To split them:
+
+```text
+/lb_world_bind Marduk1_v2
+```
+
+Run that in the copy. It registers under the new name, takes a new id, and the
+two worlds have separate histories from then on.
+
+Registration **adopts by name**: binding a copy under the original's name merges
+their histories, silently. The name you pass is the decision.
+
+---
+
+## Troubleshooting
+
+**`[luantibot] inactive: luantibot_world is not set`**
+Add `luantibot_world = <world directory name>` to `minetest.conf` and restart.
+
+**`[luantibot] inactive: luantibot_world is "X" but this world is "Y"`**
+The setting names a different world than the one running. Fail-closed working as
+intended.
+
+**`[luantibot] no HTTP API`**
+`secure.http_mods = luantibot` is missing. `/lb_emerge` still works; polling does
+not. Requires a restart — the HTTP handle is only obtainable at mod load time.
+
+**Mod does not appear at all**
+Add `load_mod_luantibot = true` to the world's `world.mt`.
+
+**`require() is disabled when mod security is on`**
+A module is importing a sibling with `require`. Luanti forbids it; inject the
+dependency instead. See "The constraint that makes Lua testable" in
+[docs/implementation_plan.md](docs/implementation_plan.md).
+
+**Every mapblock emerges as errored or cancelled**
+Usually a broken mapgen configuration rather than anything in this mod — a world
+whose `map_meta.txt` was written by hand lacks the noise parameters that games
+like mineclonia read back. Let Luanti create worlds.
+
+**Warning about the service name differing from the local directory**
+Either the world was renamed (fine) or it is a copy that should be re-bound. The
+mod warns and continues, because at that instant the two cases are
+indistinguishable.
+
+---
+
+## Developing
+
+Requires [uv](https://docs.astral.sh/uv/) and a Lua toolchain. Luanti embeds
+**LuaJIT (Lua 5.1)**; Homebrew's `lua` is 5.5 and differs in ways that matter for
+this code, so the tools are installed against LuaJIT into a project-local tree:
+
+```sh
+brew install luajit luarocks stylua
+luarocks --lua-version=5.1 --lua-dir="$(brew --prefix luajit)" \
+         --tree=.luarocks install busted
+luarocks --lua-version=5.1 --lua-dir="$(brew --prefix luajit)" \
+         --tree=.luarocks install luacheck
+
+uv sync
+uv run pre-commit install --install-hooks
+uv run pre-commit install --hook-type pre-push
+```
+
+| Command | Runs |
+| --- | --- |
+| `uv run pytest` | Python unit and API tests |
+| `./scripts/busted` | Lua unit tests |
+| `./scripts/luacheck` | Lua linter |
+| `./scripts/integration` | Real Luanti server + real service, end to end |
+| `uv run pre-commit run --all-files` | Everything else |
+
+`./scripts/integration` builds a disposable world under `tests/integration/run/`
+on the sqlite3 backend — it never touches your real worlds or PostgreSQL. It is
+also the only layer that catches mod-loading problems, since a passing `busted`
+run does not prove a module loads inside Luanti. Run it every milestone.
+
+See [docs/implementation_plan.md](docs/implementation_plan.md) for the design and
+the build order.

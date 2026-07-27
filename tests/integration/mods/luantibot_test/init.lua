@@ -81,8 +81,64 @@ local function check_emerge(done)
     end)
 end
 
+-- The mod registers with the service on its first poll, so this waits for the
+-- handshake rather than asserting immediately. Covers the whole M1.4 path:
+-- globalstep -> HTTP -> service -> SQLite -> mod storage.
+local function check_registration(done)
+    local waited = 0
+    local function poll_until_registered()
+        local id = luantibot.poller and luantibot.poller:world_id()
+        if id then
+            check("registered with the service", type(id) == "number", tostring(id))
+            -- Any state but "register" means the handshake completed. Not
+            -- specifically "idle": if a job was already queued, the poller has
+            -- rightly moved on to it by the time we look.
+            check(
+                "poller left the registration state",
+                luantibot.poller:state() ~= "register",
+                luantibot.poller:state()
+            )
+            core.log("action", "[luantibot_test] registered as world_id=" .. tostring(id))
+            return done()
+        end
+        waited = waited + 1
+        if waited > 30 then
+            check("registered with the service", false, "no world_id after 15s")
+            return done()
+        end
+        core.after(0.5, poll_until_registered)
+    end
+    poll_until_registered()
+end
+
+-- M1's success criterion: a job submitted to the service from outside is
+-- fetched, executed, and reported, with no chat command involved.
+-- scripts/integration queues the job before the server boots, and asserts the
+-- resulting row is `completed` after it exits.
+local function check_job_round_trip(done)
+    local waited = 0
+    local function poll_until_done()
+        local stats = luantibot.stats or {}
+        if (stats.jobs_done or 0) + (stats.jobs_failed or 0) > 0 then
+            check("executed a job from the service", stats.jobs_done == 1, "job failed")
+            return done()
+        end
+        waited = waited + 1
+        if waited > 60 then
+            check("executed a job from the service", false, "no job executed after 30s")
+            return done()
+        end
+        core.after(0.5, poll_until_done)
+    end
+    poll_until_done()
+end
+
 local function run_checks()
     check("mod loaded", luantibot ~= nil, "global luantibot table missing")
+
+    -- Fail-closed arming: without luantibot_world matching, the mod does
+    -- nothing at all, and none of the rest of this would be reachable.
+    check("armed for this world", luantibot.armed == true, "mod refused to arm")
 
     check(
         "wire format exposed",
@@ -112,6 +168,8 @@ local function run_checks()
     check("get_dir_list sees the written file", listed, "probe file not listed")
 
     async(check_emerge)
+    async(check_registration)
+    async(check_job_round_trip)
 end
 
 local function finish()

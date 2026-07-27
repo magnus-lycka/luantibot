@@ -200,10 +200,22 @@ tested with busted and fakes that are a dozen lines each.
 **Adapters** may touch the engine, and in exchange are allowed no logic — no
 branching on job content, no arithmetic beyond argument shuffling. `world.lua`
 wraps `core.emerge_area`, `core.get_voxel_manip`, `core.get_content_id`.
-`snapshot.lua` wraps file I/O. `init.lua` is the wiring that acquires engine
-handles at load time — including `core.request_http_api()`, which *must* run at
-top level — and injects them into the pure modules. Adapters get integration
-coverage only.
+`client.lua` wraps HTTP, `storage.lua` wraps mod storage, `snapshot.lua` will
+wrap file I/O. `init.lua` is the wiring that acquires engine handles at load
+time — including `core.request_http_api()`, which *must* run at top level — and
+injects them into the pure modules. Adapters get integration coverage only.
+
+> **`require()` is disabled under Luanti's mod security.** A pure module cannot
+> import a sibling pure module: busted resolves `require` happily via `lpath`,
+> and the same file then dies inside the engine with *"require() is disabled
+> when mod security is on"*. So a pure module needing another is written as a
+> factory taking its dependencies — exactly like engine capabilities are
+> injected. `validate.lua` is the first of these:
+> `load("validate")({ version = version })`.
+>
+> The consequence worth internalising: **a green busted run does not prove a
+> module loads in Luanti.** Only the integration harness catches this class,
+> which is an argument for running it at every milestone rather than at the end.
 
 The test for which file something belongs in: if you can imagine a bug in it, it
 goes in a pure module. `apply.lua` doesn't take a VoxelManip, it takes a flat
@@ -759,7 +771,7 @@ against SQLite with only `conftest.py` changed. Notes:
   stripped under `python -O` and a NULL in a NOT NULL column means the schema
   and the code disagree, which should be loud.
 
-**1.4 — Lua polls over HTTP.**
+**1.4 — Lua polls over HTTP.** ✅ **DONE**
 `local http = core.request_http_api()` at the **top level** of `init.lua` — it
 returns nil if called later or if the mod isn't in `secure.http_mods`. Use
 `core.parse_json` / `core.write_json`; you do not need dkjson. A globalstep
@@ -779,6 +791,24 @@ guard has to exist before the thing it guards against.
 Plus a fail-closed `luantibot_world` setting checked against the local world
 directory name, so a mod installed globally rather than per-world does nothing
 until deliberately armed.
+
+Delivered as pure `poll.lua`, `identity.lua`, `validate.lua`; adapters
+`client.lua`, `storage.lua`; and the wiring in `init.lua`. 75 Lua tests. The
+integration harness now runs the **real service** alongside the server, so a job
+queued by `curl` before boot is fetched, executed and reported with nothing
+in-world triggering it — and the run asserts the service's own row reads
+`completed`. Notes:
+
+- **`poll.lua` never touches HTTP.** It emits request descriptions and consumes
+  response descriptions, which is what lets a bare Lua interpreter test the
+  whole state machine — backoff, one-request-in-flight, report-then-poll — with
+  no network and no engine.
+- **Rebinding bumps an epoch**, and a response arriving under a stale epoch is
+  dropped. Without it, a poll in flight when you `/lb_world_bind` could resolve
+  against the identity you just abandoned and attach work to the wrong world.
+- **A failed completion report does not retry forever.** The job is finished
+  either way and the service sweeps a cold row as `interrupted`; retrying would
+  strand the mod on a job it has already done.
 
 *Test first:* busted specs for `poll.lua`'s state machine with an injected fake
 `http` — idle → job → running → report → idle, plus what happens when the
