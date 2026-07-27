@@ -15,7 +15,7 @@ Register = Callable[[str], int]
 
 
 def test_registration_returns_an_id(client: TestClient, register: Register) -> None:
-    assert register("Marduk1") > 0
+    assert register("TestWorld") > 0
 
 
 def test_registration_adopts_an_existing_world_by_name(
@@ -23,8 +23,8 @@ def test_registration_adopts_an_existing_world_by_name(
 ) -> None:
     # A mod installed into a world the service already knows must attach to
     # that row, not fork a duplicate and detach its build history.
-    first = register("Marduk1")
-    second = register("Marduk1")
+    first = register("TestWorld")
+    second = register("TestWorld")
 
     assert first == second
     assert len(client.get("/v1/worlds").json()) == 1
@@ -32,7 +32,7 @@ def test_registration_adopts_an_existing_world_by_name(
 
 def test_distinct_names_are_distinct_worlds(client: TestClient, register: Register) -> None:
     # This is how a copied world is split off: bind it under a new name.
-    assert register("Marduk1") != register("Marduk1_v2")
+    assert register("TestWorld") != register("TestWorld_copy")
     assert len(client.get("/v1/worlds").json()) == 2
 
 
@@ -59,9 +59,9 @@ def test_a_job_is_never_offered_to_another_world(
     If this ever fails, a job compiled for one world could be applied to
     another -- irreversibly, once fill_box exists in M2.
     """
-    mine = register("Marduk1")
-    other = register("Marduk1_v2")
-    submit(job_doc)  # belongs to Marduk1
+    mine = register("TestWorld")
+    other = register("TestWorld_copy")
+    submit(job_doc)  # belongs to TestWorld
 
     assert client.get(f"/v1/worlds/{other}/jobs/next").status_code == 204
     assert client.get(f"/v1/worlds/{mine}/jobs/next").status_code == 200
@@ -70,11 +70,11 @@ def test_a_job_is_never_offered_to_another_world(
 def test_each_world_gets_its_own_queue(
     client: TestClient, job_doc: dict[str, Any], submit: Submit, register: Register
 ) -> None:
-    mine = register("Marduk1")
-    other = register("Marduk1_v2")
+    mine = register("TestWorld")
+    other = register("TestWorld_copy")
 
     a = submit(job_doc)
-    b = submit({**job_doc, "world": "Marduk1_v2"})
+    b = submit({**job_doc, "world": "TestWorld_copy"})
 
     assert client.get(f"/v1/worlds/{mine}/jobs/next").json()["job_id"] == a
     assert client.get(f"/v1/worlds/{other}/jobs/next").json()["job_id"] == b
@@ -98,5 +98,5 @@ def test_history_is_world_scoped(
     job_id = submit(job_doc)
     row = client.get(f"/v1/jobs/{job_id}").json()
 
-    assert row["world"] == "Marduk1"
-    assert row["world_id"] == register("Marduk1")
+    assert row["world"] == "TestWorld"
+    assert row["world_id"] == register("TestWorld")

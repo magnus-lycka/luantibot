@@ -113,3 +113,51 @@ def test_startup_sweeps_a_job_left_running_by_a_crash(
     with TestClient(create_app(second)) as client:
         assert client.get(f"/v1/jobs/{job_id}").json()["state"] == "interrupted"
     second.close()
+
+
+def test_a_world_is_not_given_a_second_job_while_one_runs(
+    client: TestClient, job_doc: dict[str, Any], world_id: int, submit: Submit
+) -> None:
+    """One job at a time per world.
+
+    Without this, a mod whose completion report was lost would poll again and
+    be handed more work while the service still believes the first job is
+    running -- two jobs live in a world that can only execute one.
+    """
+    submit(job_doc)
+    submit(job_doc)
+
+    assert client.get(f"/v1/worlds/{world_id}/jobs/next").status_code == 200
+    assert client.get(f"/v1/worlds/{world_id}/jobs/next").status_code == 204
+
+
+def test_another_world_is_unaffected_by_a_running_job(
+    client: TestClient, job_doc: dict[str, Any], world_id: int, submit: Submit
+) -> None:
+    other = client.post("/v1/worlds", json={"name": "OtherWorld"}).json()["world_id"]
+    submit(job_doc)
+    submit({**job_doc, "world": "OtherWorld"})
+
+    assert client.get(f"/v1/worlds/{world_id}/jobs/next").status_code == 200
+    assert client.get(f"/v1/worlds/{other}/jobs/next").status_code == 200
+
+
+def test_polling_reconciles_a_stale_running_job(tmp_path: Path, job_doc: dict[str, Any]) -> None:
+    """Reconciliation cannot wait for a service restart.
+
+    If a completion report is lost while the service keeps running, the row
+    stays `running` and the world is blocked. Sweeping on every reserve means
+    the next poll past the staleness window clears it.
+    """
+    store = SqliteStore(tmp_path / "stale.sqlite", stale_after=timedelta(0))
+    with TestClient(create_app(store)) as client:
+        first = post_job(client, job_doc)
+        world_id = client.get(f"/v1/jobs/{first}").json()["world_id"]
+        second = post_job(client, job_doc)
+
+        assert client.get(f"/v1/worlds/{world_id}/jobs/next").json()["job_id"] == first
+        # First job is now stranded in `running`. The next poll sweeps it and
+        # hands out the queued one rather than blocking forever.
+        assert client.get(f"/v1/worlds/{world_id}/jobs/next").json()["job_id"] == second
+        assert client.get(f"/v1/jobs/{first}").json()["state"] == "interrupted"
+    store.close()

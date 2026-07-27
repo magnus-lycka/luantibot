@@ -15,10 +15,10 @@ Symlink it into the world's `worldmods` directory, so it exists for that world
 and no other:
 
 ```sh
-WORLD=~/Library/Application\ Support/minetest/worlds/Marduk1
+WORLD=~/Library/Application\ Support/minetest/worlds/MyWorld
 
 mkdir -p "$WORLD/worldmods"
-ln -s ~/work/luantibot/mods/luantibot "$WORLD/worldmods/luantibot"
+ln -s /path/to/luantibot/mods/luantibot "$WORLD/worldmods/luantibot"
 ```
 
 Mods in `worldmods` are normally enabled automatically. If the log does not show
@@ -37,7 +37,7 @@ until you name the world it may act in. Add to
 `~/Library/Application Support/minetest/minetest.conf`:
 
 ```ini
-luantibot_world = Marduk1
+luantibot_world = MyWorld
 ```
 
 The value is the world's **directory name**, which is what appears under
@@ -71,7 +71,7 @@ be acquired at load time — so this needs a server restart, not a `/reload`.
 Then run the service:
 
 ```sh
-cd ~/work/luantibot
+cd /path/to/luantibot
 uv run python -m luantibot.service --db luantibot.sqlite
 ```
 
@@ -83,8 +83,8 @@ the mod registers itself and logs its identity:
 
 ```text
 ACTION[Main]:   [luantibot] loaded, wire format 1
-ACTION[Main]:   [luantibot] unregistered (dir: Marduk1)
-ACTION[Server]: [luantibot] world_id=1 "Marduk1" (dir: Marduk1)
+ACTION[Main]:   [luantibot] unregistered (dir: MyWorld)
+ACTION[Server]: [luantibot] world_id=1 "MyWorld" (dir: MyWorld)
 ```
 
 The third line is the handshake completing. From then on the id is cached in the
@@ -125,7 +125,7 @@ looks — a radius of 64 is not twice the work of 32, it is nearly six times:
 
 So **~112 is the largest usable radius** at the default
 `luantibot_max_emerge_blocks`. Times assume roughly 64 ms per mapblock, measured
-on carpathian with mineclonia; your terrain and hardware will differ.
+on a mineclonia world; your mapgen, terrain and hardware will all shift it.
 
 Emerging runs on its own threads, so the server keeps responding, but it is
 CPU-heavy while it works.
@@ -134,7 +134,7 @@ CPU-heavy while it works.
 
 ```sh
 curl -X POST localhost:8080/v1/jobs -H 'Content-Type: application/json' \
-  -d '{"format":1,"world":"Marduk1",
+  -d '{"format":1,"world":"MyWorld",
        "bounds":{"min":[-5960,0,-5510],"max":[-5897,63,-5447]},
        "ops":[{"op":"emerge"}]}'
 ```
@@ -191,11 +191,11 @@ to the right world, and it survives renaming the world *or* renaming it in the
 service — neither name is the identity.
 
 Because mod storage lives in the world directory, **copying a world copies its
-identity**. `cp -r Marduk1 Marduk1_v2` produces a second world claiming to be
+identity**. `cp -r MyWorld MyWorld_v2` produces a second world claiming to be
 world 1. To split them:
 
 ```text
-/lb_world_bind Marduk1_v2
+/lb_world_bind MyWorld_v2
 ```
 
 Run that in the copy. It registers under the new name, takes a new id, and the

@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from luantibot.service.app import create_app
 from luantibot.service.store import SqliteStore
 
-WORLD_NAME = "Marduk1"
+WORLD_NAME = "TestWorld"
 
 
 @pytest.fixture

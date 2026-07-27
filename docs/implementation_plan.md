@@ -89,8 +89,8 @@ luantibot/
 The mod must be visible to Luanti. Symlink it once:
 
 ```sh
-ln -s ~/work/luantibot/mods/luantibot \
-      ~/Library/Application\ Support/minetest/worlds/Marduk1/worldmods/luantibot
+ln -s /path/to/luantibot/mods/luantibot \
+      ~/Library/Application\ Support/minetest/worlds/MyWorld/worldmods/luantibot
 ```
 
 And in `minetest.conf`:
@@ -282,19 +282,20 @@ a full integration run.
 
 ### Integration harness
 
-Use a **scratch world**, never Marduk1, and use SQLite for its map backend so it
-is disposable:
-
-```sh
-rm -rf ~/Library/Application\ Support/minetest/worlds/lbtest
-```
+Use a **scratch world**, never a world you care about, on the SQLite map backend
+so it is disposable. Build it inside the repo under `tests/integration/run/`
+(gitignored) and delete it on every run, rather than anywhere near the real
+worlds directory.
 
 Drive the server headless and let a test mod assert and shut down:
 
 ```sh
-LUANTI=~/work/luanti/build-postgresql/macos/luanti.app/Contents/MacOS/luanti
-"$LUANTI" --server --world .../worlds/lbtest --config tests/integration/test.conf
+"$LUANTI" --server --world "$RUN_DIR/world" --config "$CONF" --gameid "$GAMEID"
 ```
+
+Machine-specific values — the binary path especially — belong in
+`scripts/local.env`, which is gitignored and sourced by the harness. Nothing
+about one developer's setup should be committed.
 
 Assertions go in a `luantibot_test` mod that runs on
 `core.register_on_mods_loaded`, exercises the real API, calls
@@ -405,7 +406,7 @@ independently.
   "format": 1,
   "job_id": 173,
   "world_id": 3,
-  "world": "Marduk1",
+  "world": "MyWorld",
   "palette": ["air", "mcl_core:stonebrick", "mcl_core:stone"],
   "bounds": {"min": [-6000, -20, -5500], "max": [-5800, 30, -5350]},
   "ops": [
@@ -531,14 +532,14 @@ world. Three chat commands, all `server` priv, all logged:
 - `/lb_world` — show stored id, the service's name for it, and the local world
   directory name.
 - `/lb_world_bind <name>` — register under `<name>` and overwrite the stored id.
-  This is what splits a copy off: `cp -r Marduk1 Marduk1_v2`, boot it, then
-  `/lb_world_bind Marduk1_v2`.
+  This is what splits a copy off: `cp -r MyWorld MyWorld_v2`, boot it, then
+  `/lb_world_bind MyWorld_v2`.
 - `/lb_world_forget` — clear the id; re-register on next start.
 
 Two safeguards, because everything that goes wrong here goes wrong silently:
 
-- **Log identity on every startup**: `[luantibot] world_id=3 "Marduk1"
-  (dir: Marduk1)`.
+- **Log identity on every startup**: `[luantibot] world_id=3 "MyWorld"
+  (dir: MyWorld)`.
 - **Warn, do not refuse, on divergence** between the service's name and the
   local directory name. A legitimate rename and an accidental copy look
   identical at that instant, so refusing would break the legitimate case.
@@ -731,7 +732,7 @@ units_total, error_code, error_msg, snapshot_path)`, both `AUTOINCREMENT`.
 WAL mode, one writer.
 
 `world_id` and the bbox are **columns, not JSON**, because "what did I build
-around here in Marduk1" is the query the whole history exists to answer:
+around here in MyWorld" is the query the whole history exists to answer:
 
 ```sql
 SELECT * FROM job WHERE world_id = ? AND state = 'completed'

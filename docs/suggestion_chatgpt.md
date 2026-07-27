@@ -89,12 +89,12 @@ Example:
 ```text
 Lua mod                         Builder service
 
-GET /v1/workers/Marduk1/jobs/next
+GET /v1/workers/MyWorld/jobs/next
                          ---->
 
                          <----  204 No Content
 
-GET /v1/workers/Marduk1/jobs/next
+GET /v1/workers/MyWorld/jobs/next
                          ---->
 
                          <----  200 OK + job document
@@ -213,7 +213,7 @@ Example job:
 ```json
 {
   "version": 1,
-  "world": "Marduk1",
+  "world": "MyWorld",
   "operations": [
     {
       "type": "corridor",

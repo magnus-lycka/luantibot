@@ -13,7 +13,7 @@ local plan = load("plan")
 local emerge = load("emerge")
 local parse = load("parse")
 local identity = load("identity")
-local validate = load("validate")({ version = version })
+local validate = load("validate")({ version = version, plan = plan })
 local poll = load("poll")
 local world = load("world")({ emerge = emerge })
 
@@ -119,7 +119,6 @@ if not http then
 end
 
 local client = load("client")({ http = http, base_url = BASE_URL })
-local service_name = nil
 
 local poller = poll.new({
     world_name = LOCAL_WORLD,
@@ -132,8 +131,17 @@ luantibot.stats = { jobs_done = 0, jobs_failed = 0 }
 local function log_identity()
     core.log(
         "action",
-        "[luantibot] " .. identity.describe(poller:world_id(), service_name, LOCAL_WORLD)
+        "[luantibot] " .. identity.describe(poller:world_id(), poller:known_as(), LOCAL_WORLD)
     )
+end
+
+-- Warn, never refuse: a legitimate rename and an accidental world copy look
+-- identical from here, so refusing would break the legitimate case.
+local function warn_on_divergence()
+    local warning = identity.divergence(poller:known_as(), LOCAL_WORLD)
+    if warning then
+        core.log("warning", "[luantibot] " .. warning)
+    end
 end
 
 -- Executes a job the service handed us, then tells the poller how it went.
@@ -144,7 +152,10 @@ local function fail_job(job, code, message)
 end
 
 local function run_job(job)
-    local ok, code, message = validate.job(job, { world_id = poller:world_id() })
+    local ok, code, message = validate.job(job, {
+        world_id = poller:world_id(),
+        max_blocks = MAX_EMERGE_BLOCKS,
+    })
     if not ok then
         fail_job(job, code, message)
         return
@@ -157,11 +168,13 @@ local function run_job(job)
         return
     end
 
-    local lo, hi = job.bounds.min, job.bounds.max
-    local p1 = { x = lo[1], y = lo[2], z = lo[3] }
-    local p2 = { x = hi[1], y = hi[2], z = hi[3] }
+    local p1, p2 = validate.positions(job)
     local started = core.get_us_time()
 
+    -- Reserved is not started: only the mod can say the work actually began,
+    -- and after a crash that distinction is what separates "died before
+    -- starting" from "died mid-job".
+    poller:report(string.format("/v1/jobs/%d/started", job.job_id), {})
     core.log("action", string.format("[luantibot] job %d: emerging", job.job_id))
 
     world.emerge(p1, p2, function(result)
@@ -188,6 +201,10 @@ local function handle(event)
     if event.kind == "registered" then
         storage.set_world_id(event.world_id)
         log_identity()
+        warn_on_divergence()
+    elseif event.kind == "world" then
+        log_identity()
+        warn_on_divergence()
     elseif event.kind == "job" then
         run_job(event.job)
     elseif event.kind == "error" then
@@ -208,7 +225,7 @@ core.register_chatcommand("lb_world", {
     description = "Show this server's luantibot world identity",
     privs = { server = true },
     func = function()
-        return true, identity.describe(poller:world_id(), service_name, LOCAL_WORLD)
+        return true, identity.describe(poller:world_id(), poller:known_as(), LOCAL_WORLD)
     end,
 })
 
@@ -221,10 +238,12 @@ core.register_chatcommand("lb_world_bind", {
         if name == "" then
             return false, "usage: /lb_world_bind <name>"
         end
+        if poller:state() == "busy" or poller:state() == "report" then
+            return false, "a job is running; rebinding now would orphan it. Wait for it to finish."
+        end
         -- Binding a world *copy* under the original's name merges their
         -- histories, silently. The name is the decision; the id follows it.
         core.log("action", string.format("[luantibot] %s rebinding world to %q", caller, name))
-        service_name = nil
         storage.clear()
         poller:rebind(name)
         return true, "rebinding to " .. name .. "; watch the log"
@@ -235,8 +254,10 @@ core.register_chatcommand("lb_world_forget", {
     description = "Forget the cached world id and re-register on the next poll",
     privs = { server = true },
     func = function(caller)
+        if poller:state() == "busy" or poller:state() == "report" then
+            return false, "a job is running; forgetting now would orphan it. Wait for it to finish."
+        end
         core.log("action", "[luantibot] " .. caller .. " cleared the cached world id")
-        service_name = nil
         storage.clear()
         poller:forget()
         return true, "forgotten; will re-register as " .. LOCAL_WORLD

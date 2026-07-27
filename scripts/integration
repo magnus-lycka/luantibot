@@ -3,22 +3,28 @@
 # tests/integration/mods/luantibot_test, and report.
 #
 # The scratch world is destroyed and recreated on every run, on the sqlite3 map
-# backend, so it is a throwaway file that never touches PostgreSQL or Marduk1.
+# backend, so it is a throwaway file that never touches PostgreSQL or any world
+# you care about.
 #
-# Mapgen and seed match the real world (Marduk1): carpathian, seed 650101. That
-# makes test terrain representative of what the builder will actually meet --
-# real hills to tunnel through in M3 and M5 -- and a fixed seed keeps it
-# deterministic, which M2 and M6 region comparisons depend on.
+# A fixed mapgen and seed keep its terrain deterministic, which the M2 and M6
+# region comparisons depend on. Point MAPGEN and SEED at the world you actually
+# build in and the terrain becomes representative of it too.
 #
-# Do not reach for the other mapgens: `flat` crashes mineclonia's levelgen and
-# `singlenode` hangs it during stronghold placement.
+# Do not reach for `flat` or `singlenode`: the first crashes mineclonia's
+# levelgen, the second hangs it during stronghold placement.
 set -e
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-LUANTI=${LUANTI:-$HOME/work/luanti/build-postgresql/macos/luanti.app/Contents/MacOS/luanti}
+
+# Machine-specific settings live here, uncommitted. See scripts/local.env.example
+if [ -f "$REPO_ROOT/scripts/local.env" ]; then
+    . "$REPO_ROOT/scripts/local.env"
+fi
+
+LUANTI=${LUANTI:-$(command -v luantiserver || command -v luanti || echo luanti)}
 GAMEID=${GAMEID:-mineclonia}
-MAPGEN=${MAPGEN:-carpathian}
-SEED=${SEED:-650101}
+MAPGEN=${MAPGEN:-v7}
+SEED=${SEED:-1}
 TIMEOUT=${TIMEOUT:-120}
 
 RUN_DIR="$REPO_ROOT/tests/integration/run"
@@ -27,8 +33,8 @@ LOGFILE="$RUN_DIR/debug.txt"
 RESULT="$WORLD/result.json"
 
 if [ ! -x "$LUANTI" ]; then
-    echo "luanti binary not found or not executable: $LUANTI" >&2
-    echo "set LUANTI=/path/to/luanti to override" >&2
+    echo "luanti server binary not found: $LUANTI" >&2
+    echo "Set LUANTI in scripts/local.env -- see scripts/local.env.example" >&2
     exit 1
 fi
 

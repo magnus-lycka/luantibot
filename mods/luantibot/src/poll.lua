@@ -7,21 +7,30 @@
 -- *response descriptions*, which is what makes it testable in a bare Lua
 -- interpreter; init.lua turns those into core.request_http_api() calls.
 --
---     register --> idle <--> busy --> (report) --> idle
+--     register --> world --> idle <--> busy --> report --> idle
 --
--- One request is in flight at a time. Nothing is emitted while busy, because
--- the executor owns the world then and reserving a second job would strand it.
+-- One request is in flight at a time. While a job runs the only thing emitted
+-- is a *side report* -- `started` now, `progress` from M4 -- because the
+-- executor owns the world then and reserving a second job would strand it.
 
 local poll = {}
+
+--- How many times to re-send a completion report before giving up. The world
+--- work is already done; the service holds the row `running` until it hears,
+--- so a transient failure must not simply be dropped.
+local REPORT_ATTEMPTS = 4
 
 local Poll = {}
 Poll.__index = Poll
 
---- @param cfg table { world_name, world_id?, interval?, backoff_max? }
+--- @param cfg table { world_name, world_id?, world_known_as?, interval?, backoff_max? }
 function poll.new(cfg)
     local self = setmetatable({
         world_name = cfg.world_name,
         _world_id = cfg.world_id,
+        -- The service's own label for our id. Needed to spot divergence from
+        -- the local world directory; unknown when starting from a cached id.
+        _known_as = cfg.world_known_as,
         interval = cfg.interval or 2,
         backoff_max = cfg.backoff_max or 30,
 
@@ -30,6 +39,8 @@ function poll.new(cfg)
         _inflight = nil,
         _job = nil,
         _report = nil,
+        _report_tries = 0,
+        _side = {},
         -- Bumped on rebind/forget so a response from the previous identity can
         -- be recognised as stale and dropped.
         _epoch = 1,
@@ -46,13 +57,22 @@ function Poll:world_id()
     return self._world_id
 end
 
+function Poll:known_as()
+    return self._known_as
+end
+
 function Poll:wait()
     return self._wait
+end
+
+function Poll:job()
+    return self._job
 end
 
 --- Drop the cached identity; the next tick re-registers.
 function Poll:forget()
     self._world_id = nil
+    self._known_as = nil
     self._state = "register"
     self:_reset_timing()
 end
@@ -67,39 +87,73 @@ end
 function Poll:_reset_timing()
     self._epoch = self._epoch + 1
     self._inflight = nil
+    self._job = nil
+    self._report = nil
+    self._report_tries = 0
+    self._side = {}
     self._wait = 0
     self._elapsed = 0
+end
+
+--- Queue a best-effort report that goes out even while a job is running:
+--- `started`, and `progress` from M4. Never retried -- losing a progress ping
+--- must not stall the job it describes.
+function Poll:report(path, body)
+    self._side[#self._side + 1] = {
+        kind = "side",
+        method = "POST",
+        path = path,
+        body = body or {},
+    }
 end
 
 --- Advance the clock. Returns a request table, or nil if there is nothing to do.
 --- Request: { kind, method, path, body }
 function Poll:tick(dtime)
-    if self._inflight or self._state == "busy" then
+    if self._inflight then
         return nil
     end
 
-    self._elapsed = self._elapsed + (dtime or 0)
-    if self._elapsed < self._wait then
-        return nil
-    end
-    self._elapsed = 0
-
+    -- The completion report outranks queued side reports: once a job is done,
+    -- telling the service that matters more than telling it what happened.
     local req
-    if self._state == "register" then
-        req = {
-            kind = "register",
-            method = "POST",
-            path = "/v1/worlds",
-            body = { name = self.world_name },
-        }
-    elseif self._state == "report" then
+    if self._state == "report" then
         req = self._report
-    else
-        req = {
-            kind = "next",
-            method = "GET",
-            path = string.format("/v1/worlds/%d/jobs/next", self._world_id),
-        }
+    elseif #self._side > 0 then
+        req = table.remove(self._side, 1)
+    elseif self._state == "busy" then
+        return nil
+    end
+
+    if not req then
+        self._elapsed = self._elapsed + (dtime or 0)
+        if self._elapsed < self._wait then
+            return nil
+        end
+        self._elapsed = 0
+
+        if self._state == "register" then
+            req = {
+                kind = "register",
+                method = "POST",
+                path = "/v1/worlds",
+                body = { name = self.world_name },
+            }
+        elseif self._known_as == nil then
+            -- Started from a cached id: learn the service's name for it before
+            -- doing anything else, so divergence can be reported.
+            req = {
+                kind = "world",
+                method = "GET",
+                path = string.format("/v1/worlds/%d", self._world_id),
+            }
+        else
+            req = {
+                kind = "next",
+                method = "GET",
+                path = string.format("/v1/worlds/%d/jobs/next", self._world_id),
+            }
+        end
     end
 
     self._inflight = { kind = req.kind, epoch = self._epoch }
@@ -121,10 +175,15 @@ function Poll:_succeeded()
     self._elapsed = 0
 end
 
+--- Skip the next wait, so the following tick acts immediately.
+function Poll:_go_now()
+    self._elapsed = self._wait
+end
+
 --- Feed an HTTP result back in. Returns an event describing what it meant:
----   { kind = "registered", world_id }  { kind = "job", job }
----   { kind = "none" }  { kind = "reported" }  { kind = "error", message }
----   { kind = "stale" } -- arrived after a rebind, ignored
+---   { kind = "registered", world_id, name }  { kind = "world", name }
+---   { kind = "job", job }  { kind = "none" }  { kind = "reported" }
+---   { kind = "error", message }  { kind = "stale" } -- after a rebind
 --- @param res table { ok = boolean, code = number, body = table|nil }
 function Poll:on_response(res)
     local inflight = self._inflight
@@ -138,18 +197,35 @@ function Poll:on_response(res)
     end
     self._inflight = nil
 
+    if inflight.kind == "side" then
+        -- Best effort by design; see Poll:report.
+        return failed(res) and { kind = "error", message = "side report dropped" }
+            or { kind = "reported" }
+    end
+
     if inflight.kind == "report" then
-        -- The job is finished either way, and the service sweeps a row whose
-        -- heartbeat went cold. Retrying a report forever would strand the mod.
+        if failed(res) then
+            self._report_tries = self._report_tries + 1
+            if self._report_tries < REPORT_ATTEMPTS then
+                self:_backoff()
+                return { kind = "error", message = "completion report failed; will retry" }
+            end
+            -- Out of attempts. The job is done in-world either way, and the
+            -- service sweeps a row whose heartbeat went cold -- better to take
+            -- new work than to spin on a report nobody is accepting.
+            self._state = "idle"
+            self._report = nil
+            self._job = nil
+            self._report_tries = 0
+            self:_backoff()
+            return { kind = "error", message = "completion report abandoned after retries" }
+        end
         self._state = "idle"
         self._report = nil
         self._job = nil
-        if failed(res) then
-            self:_backoff()
-            return { kind = "error", message = "completion report was not accepted" }
-        end
+        self._report_tries = 0
         self:_succeeded()
-        self._elapsed = self._wait
+        self:_go_now()
         return { kind = "reported" }
     end
 
@@ -168,11 +244,23 @@ function Poll:on_response(res)
             return { kind = "error", message = "registration response had no world_id" }
         end
         self._world_id = id
+        self._known_as = res.body.name
         self._state = "idle"
         self:_succeeded()
-        -- Registered: go looking for work without waiting out an interval.
-        self._elapsed = self._wait
-        return { kind = "registered", world_id = id }
+        self:_go_now()
+        return { kind = "registered", world_id = id, name = res.body.name }
+    end
+
+    if inflight.kind == "world" then
+        local name = res.body and res.body.name
+        if type(name) ~= "string" then
+            self:_backoff()
+            return { kind = "error", message = "world lookup returned no name" }
+        end
+        self._known_as = name
+        self:_succeeded()
+        self:_go_now()
+        return { kind = "world", name = name }
     end
 
     -- kind == "next"
@@ -198,6 +286,7 @@ function Poll:finish(ok, payload)
         path = string.format("/v1/jobs/%d/%s", self._job.job_id, ok and "completed" or "failed"),
         body = payload or {},
     }
+    self._report_tries = 0
     self._state = "report"
     -- Report at once rather than after another poll interval.
     self._wait = 0

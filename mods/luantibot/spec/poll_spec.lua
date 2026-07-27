@@ -1,10 +1,26 @@
 local poll = require("poll")
 
+-- Most specs care about fetching and reporting, not identity, so a cached
+-- world_id also gets a known name by default -- otherwise every one of them
+-- would have to step through the world lookup first. Pass
+-- `world_known_as = false` to get a poller that still has to look it up.
+--
+-- Written as an explicit branch, not `x and y or z`: that idiom cannot yield
+-- nil when the alternative is falsy, which is exactly the case here.
 local function new(cfg)
     cfg = cfg or {}
+
+    local known_as
+    if cfg.world_known_as == nil then
+        known_as = cfg.world_id and "TestWorld" or nil
+    elseif cfg.world_known_as ~= false then
+        known_as = cfg.world_known_as
+    end
+
     return poll.new({
-        world_name = cfg.world_name or "Marduk1",
+        world_name = cfg.world_name or "TestWorld",
         world_id = cfg.world_id,
+        world_known_as = known_as,
         interval = cfg.interval or 2,
         backoff_max = cfg.backoff_max or 30,
     })
@@ -24,7 +40,7 @@ describe("poll registration", function()
         assert.are.equal("register", req.kind)
         assert.are.equal("POST", req.method)
         assert.are.equal("/v1/worlds", req.path)
-        assert.are.same({ name = "Marduk1" }, req.body)
+        assert.are.same({ name = "TestWorld" }, req.body)
     end)
 
     it("registers immediately rather than waiting out the interval", function()
@@ -161,16 +177,9 @@ describe("poll reporting", function()
         assert.are.equal("next", p:tick(0).kind)
     end)
 
-    -- A dropped completion report must not strand the mod: the job is finished
-    -- either way, and the service will sweep its row as interrupted.
-    it("gives up on the report rather than retrying forever", function()
-        local p = busy_with_job()
-        p:finish(true, {})
-        due(p)
-        p:on_response({ ok = false, code = 0 })
-
-        assert.are.equal("idle", p:state())
-    end)
+    -- A dropped completion report is retried rather than discarded, and
+    -- abandoned rather than retried forever. Both halves live in
+    -- "poll terminal report retry" below.
 end)
 
 describe("poll backoff", function()
@@ -238,11 +247,11 @@ describe("poll rebinding", function()
 
     it("rebinding under a new name registers with that name", function()
         local p = new({ world_id = 3 })
-        p:rebind("Marduk1_v2")
+        p:rebind("TestWorld_copy")
 
         local req = due(p)
         assert.are.equal("register", req.kind)
-        assert.are.same({ name = "Marduk1_v2" }, req.body)
+        assert.are.same({ name = "TestWorld_copy" }, req.body)
     end)
 
     it("a response arriving after a rebind is ignored", function()
@@ -250,10 +259,126 @@ describe("poll rebinding", function()
         -- old identity and attach work to the wrong world.
         local p = new({ world_id = 3 })
         due(p)
-        p:rebind("Marduk1_v2")
+        p:rebind("TestWorld_copy")
         local event = p:on_response({ ok = true, code = 200, body = { job_id = 9, ops = {} } })
 
         assert.are.equal("stale", event.kind)
         assert.are.equal("register", p:state())
+    end)
+end)
+
+describe("poll side reports", function()
+    local function busy_with_job()
+        local p = new({ world_id = 3 })
+        due(p)
+        p:on_response({ ok = true, code = 200, body = { job_id = 9, ops = {} } })
+        return p
+    end
+
+    -- `started` (and, from M4, `progress`) must go out *while* a job runs.
+    -- Without this channel the mod is silent between reservation and
+    -- completion, so a crash mid-job is indistinguishable from one before it.
+    it("emits a queued side report even while busy", function()
+        local p = busy_with_job()
+        p:report("/v1/jobs/9/started", {})
+
+        local req = p:tick(0)
+        assert.is_table(req)
+        assert.are.equal("side", req.kind)
+        assert.are.equal("/v1/jobs/9/started", req.path)
+    end)
+
+    it("stays busy after a side report resolves", function()
+        local p = busy_with_job()
+        p:report("/v1/jobs/9/started", {})
+        p:tick(0)
+        local event = p:on_response({ ok = true, code = 204 })
+
+        assert.are.equal("reported", event.kind)
+        assert.are.equal("busy", p:state())
+    end)
+
+    it("does not retry a dropped side report", function()
+        -- Best-effort: losing a progress ping must not stall the job.
+        local p = busy_with_job()
+        p:report("/v1/jobs/9/started", {})
+        p:tick(0)
+        p:on_response({ ok = false, code = 0 })
+
+        assert.is_nil(p:tick(0))
+        assert.are.equal("busy", p:state())
+    end)
+
+    it("prefers the completion report over queued side reports", function()
+        local p = busy_with_job()
+        p:report("/v1/jobs/9/progress", { done = 1 })
+        p:finish(true, {})
+
+        assert.are.equal("/v1/jobs/9/completed", p:tick(0).path)
+    end)
+end)
+
+describe("poll terminal report retry", function()
+    local function reported_failure(attempts)
+        local p = new({ world_id = 3, interval = 2 })
+        due(p)
+        p:on_response({ ok = true, code = 200, body = { job_id = 9, ops = {} } })
+        p:finish(true, {})
+        for _ = 1, attempts do
+            due(p)
+            p:on_response({ ok = false, code = 0 })
+        end
+        return p
+    end
+
+    -- A transient failure must not lose the completion: the world work is done,
+    -- and the service would otherwise hold the row `running` until a restart.
+    it("retries a dropped completion report", function()
+        local p = reported_failure(1)
+        assert.are.equal("report", p:state())
+        assert.are.equal("/v1/jobs/9/completed", due(p).path)
+    end)
+
+    it("gives up after the retry budget and returns to polling", function()
+        local p = reported_failure(4)
+        assert.are.equal("idle", p:state())
+        assert.are.equal("next", due(p).kind)
+    end)
+end)
+
+describe("poll world name", function()
+    -- Starting from a cached id, the mod knows its number but not the name the
+    -- service has for it -- which is what the divergence warning compares.
+    it("asks for the world when starting from a cached id", function()
+        local p = new({ world_id = 3, world_known_as = false })
+        local req = due(p)
+        assert.are.equal("world", req.kind)
+        assert.are.equal("/v1/worlds/3", req.path)
+    end)
+
+    it("reports the name and then polls for work", function()
+        local p = new({ world_id = 3, world_known_as = false })
+        due(p)
+        local event = p:on_response({ ok = true, code = 200, body = { world_id = 3, name = "W" } })
+
+        assert.are.equal("world", event.kind)
+        assert.are.equal("W", event.name)
+        assert.are.equal("next", p:tick(0).kind)
+    end)
+
+    it("carries the name straight through registration", function()
+        local p = new()
+        due(p)
+        local event = p:on_response({ ok = true, code = 201, body = { world_id = 3, name = "W" } })
+
+        assert.are.equal("W", event.name)
+        assert.are.equal("next", p:tick(0).kind)
+    end)
+
+    it("does not ask again once known", function()
+        local p = new({ world_id = 3, world_known_as = false })
+        due(p)
+        p:on_response({ ok = true, code = 200, body = { world_id = 3, name = "W" } })
+        assert.are.equal("next", p:tick(0).kind)
     end)
 end)

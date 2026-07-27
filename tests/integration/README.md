@@ -15,7 +15,7 @@ more cheaply by `./scripts/busted`. Run this per milestone, not per save.
 
 1. Deletes and recreates `tests/integration/run/` (gitignored).
 2. Writes a `world.mt` using the **sqlite3** map backend, so the scratch world is
-   a throwaway file and never touches PostgreSQL or `Marduk1`.
+   a throwaway file and never touches PostgreSQL or any world you care about.
 3. Copies `test.conf` and appends `mg_name` / `fixed_map_seed`, letting the
    engine create the world.
 4. Symlinks `mods/luantibot` and `tests/integration/mods/luantibot_test` into the
@@ -26,11 +26,15 @@ more cheaply by `./scripts/busted`. Run this per milestone, not per save.
 
 ## Environment
 
-- `LUANTI` — path to the server binary. Defaults to
-  `~/work/luanti/build-postgresql/macos/luanti.app/Contents/MacOS/luanti`.
+Machine-specific values belong in `scripts/local.env`, which is gitignored and
+sourced automatically. Copy `scripts/local.env.example` to start. Anything there
+can also be given on the command line: `MAPGEN=v5 ./scripts/integration`.
+
+- `LUANTI` — path to the server binary. Defaults to `luantiserver` or `luanti`
+  from `PATH`; set it if you run a self-built binary or a macOS app bundle.
 - `GAMEID` — defaults to `mineclonia`.
-- `MAPGEN` — defaults to `carpathian`. See below.
-- `SEED` — defaults to `650101`. See below.
+- `MAPGEN` — defaults to `v7`. See below.
+- `SEED` — defaults to `1`.
 - `TIMEOUT` — seconds before the run is treated as hung. Defaults to `120`.
 
 ## Mapgen and world creation
@@ -42,15 +46,15 @@ Two traps, both hit during M1.1:
   on `tonumber(nil)` in `mcl_mapgen_models`, which surfaces as every mapblock
   emerging as `EMERGE_ERRORED`/`CANCELLED`. Set the mapgen in the config and let
   the engine write a complete `map_meta.txt` when it creates the world.
-- **Mapgen and seed match the real world.** `Marduk1` is `carpathian` /
-  `650101`, so the harness uses the same. Test terrain is then representative of
+- **Set the mapgen and seed to match the world you build in.** Put `MAPGEN` and
+  `SEED` in `scripts/local.env` and the scratch terrain becomes representative of
   what the builder will actually meet — real hills to tunnel through in M3 and
   M5 — rather than something the code only works against by accident.
 
-  Verified deterministic: two consecutive runs both probe
-  `(100,8,100) = mcl_core:diorite`. That repeatability is what M2 and M6 region
-  comparisons rest on, and the probe is logged on every run so a regression in
-  it is visible rather than silent.
+  Either way the seed is fixed, so terrain is reproducible run to run. That
+  repeatability is what M2 and M6 region comparisons rest on. The harness probes
+  one node and logs it on every run, so a regression in it is visible rather
+  than silent.
 
   Do not substitute the other mapgens: `flat` crashes mineclonia's levelgen and
   `singlenode` hangs it during stronghold placement.

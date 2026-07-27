@@ -222,3 +222,15 @@ __marimo__/
 
 # Integration harness scratch world and logs
 tests/integration/run/
+
+# Machine-specific integration settings (see scripts/local.env.example)
+scripts/local.env
+
+# Builder service database -- contains real world names, coordinates and
+# build history. Never commit it.
+luantibot.sqlite
+luantibot.sqlite-wal
+luantibot.sqlite-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm

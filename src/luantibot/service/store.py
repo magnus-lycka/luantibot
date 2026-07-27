@@ -147,6 +147,9 @@ class InMemoryStore:
             raise NotFound(f"no job {job_id}") from None
 
     def reserve(self, world_id: int) -> Job | None:
+        self.sweep_stale()
+        if any(j.world_id == world_id and j.state is State.RUNNING for j in self._jobs.values()):
+            return None
         for job in sorted(self._jobs.values(), key=lambda j: j.job_id):
             if job.world_id == world_id and job.state is State.QUEUED:
                 job.state = State.RUNNING
@@ -312,22 +315,41 @@ class SqliteStore:
             return self._job(row)
 
     def reserve(self, world_id: int) -> Job | None:
+        # Sweeping on every reserve, not only at service startup, is what
+        # reconciles a job whose completion report was lost while the service
+        # kept running. Without it that row stays `running` and blocks the
+        # world until someone restarts the service.
+        self.sweep_stale()
+
         with self._lock:
             # Scoped to the world, so a server is never offered another world's
             # work -- cross-world execution is impossible rather than caught later.
+            #
+            # And one job at a time per world: a Luanti server can execute
+            # exactly one, so handing out a second while the first is still
+            # unreported would create work that nothing can run.
             now = _iso(_now())
             with self._db:
                 cur = self._db.execute(
                     """
-                UPDATE job SET state = ?, reserved_at = ?, heartbeat_at = ?
-                WHERE id = (
-                    SELECT id FROM job
-                    WHERE world_id = ? AND state = ?
-                    ORDER BY id LIMIT 1
-                )
-                RETURNING *
-                """,
-                    (State.RUNNING.value, now, now, world_id, State.QUEUED.value),
+                    UPDATE job SET state = :running, reserved_at = :now, heartbeat_at = :now
+                    WHERE id = (
+                        SELECT id FROM job
+                        WHERE world_id = :world AND state = :queued
+                          AND NOT EXISTS (
+                              SELECT 1 FROM job busy
+                              WHERE busy.world_id = :world AND busy.state = :running
+                          )
+                        ORDER BY id LIMIT 1
+                    )
+                    RETURNING *
+                    """,
+                    {
+                        "running": State.RUNNING.value,
+                        "queued": State.QUEUED.value,
+                        "world": world_id,
+                        "now": now,
+                    },
                 )
                 row = cur.fetchone()
             return self._job(row) if row else None
