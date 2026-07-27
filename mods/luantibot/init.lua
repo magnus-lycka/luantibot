@@ -25,7 +25,7 @@ local settings = core.settings
 local storage = load("storage")({ storage = core.get_mod_storage() })
 
 local LOCAL_WORLD = identity.world_name_from_path(core.get_worldpath())
-local BASE_URL = settings:get("luantibot_service_url") or "http://127.0.0.1:8080"
+local BASE_URL = settings:get("luantibot_service_url") or "http://127.0.0.1:8099"
 local MAX_EMERGE_BLOCKS = tonumber(settings:get("luantibot_max_emerge_blocks")) or 4096
 
 luantibot = {

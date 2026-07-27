@@ -69,16 +69,24 @@ ln -s "$REPO_ROOT/tests/integration/mods/luantibot_test" "$WORLD/worldmods/luant
 
 # The builder service. From M1.4 the mod polls it, so the integration run
 # exercises the whole path: mod -> HTTP -> service -> SQLite and back.
-echo "starting builder service on 127.0.0.1:8080"
+echo "starting builder service on 127.0.0.1:8099"
 (cd "$REPO_ROOT" && uv run python -m luantibot.service \
-    --db "$RUN_DIR/luantibot.sqlite" --port 8080) >"$RUN_DIR/service.log" 2>&1 &
+    --db "$RUN_DIR/luantibot.sqlite" --port 8099) >"$RUN_DIR/service.log" 2>&1 &
 SERVICE_PID=$!
-trap 'kill "$SERVICE_PID" 2>/dev/null || true' EXIT
+
+# `uv run` execs a *child* python, so killing $SERVICE_PID leaves the server
+# itself alive holding the port -- which is how a stray service survived for
+# hours after an earlier run. Kill the child by its unique command line too.
+cleanup_service() {
+    kill "$SERVICE_PID" 2>/dev/null || true
+    pkill -f "luantibot.service --db $RUN_DIR" 2>/dev/null || true
+}
+trap cleanup_service EXIT INT TERM
 
 # Wait for it to accept connections before booting Luanti, or the mod's first
 # poll fails and backs off, wasting most of the timeout budget.
 waited=0
-until curl -fsS "http://127.0.0.1:8080/v1/health" >/dev/null 2>&1; do
+until curl -fsS "http://127.0.0.1:8099/v1/health" >/dev/null 2>&1; do
     if [ "$waited" -ge 30 ]; then
         echo "builder service did not start" >&2
         cat "$RUN_DIR/service.log" >&2
@@ -93,7 +101,7 @@ done
 # *name* also exercises adopt-by-name -- the mod registers afterwards under the
 # same name and must attach to this row rather than fork a duplicate.
 echo "submitting an emerge job"
-JOB_ID=$(curl -fsS -X POST "http://127.0.0.1:8080/v1/jobs" \
+JOB_ID=$(curl -fsS -X POST "http://127.0.0.1:8099/v1/jobs" \
     -H 'Content-Type: application/json' \
     -d '{"format":1,"world":"world",
          "bounds":{"min":[192,0,192],"max":[255,63,255]},
@@ -138,7 +146,7 @@ cat "$RESULT"
 echo
 
 # The service's own view of the job, asserted from outside both processes.
-JOB_ROW=$(curl -fsS "http://127.0.0.1:8080/v1/jobs/$JOB_ID" || echo '{}')
+JOB_ROW=$(curl -fsS "http://127.0.0.1:8099/v1/jobs/$JOB_ID" || echo '{}')
 echo "--- job $JOB_ID ---"
 echo "$JOB_ROW"
 echo

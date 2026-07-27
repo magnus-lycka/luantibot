@@ -75,8 +75,12 @@ cd /path/to/luantibot
 uv run python -m luantibot.service --db luantibot.sqlite
 ```
 
-It binds to `127.0.0.1:8080` and nothing else. Nothing about this API is safe to
+It binds to `127.0.0.1:8099` and nothing else. Nothing about this API is safe to
 expose; there is no authentication because it is not reachable off the machine.
+
+**Port 8099, not 8080** — Mapserver listens on 8080, and if you are running it
+against the same world the two would collide. Override with `--port` and
+`luantibot_service_url` if 8099 is taken too.
 
 Restart Luanti. The warning about the HTTP API is gone, and on its first poll
 the mod registers itself and logs its identity:
@@ -133,13 +137,13 @@ CPU-heavy while it works.
 ### Jobs over HTTP
 
 ```sh
-curl -X POST localhost:8080/v1/jobs -H 'Content-Type: application/json' \
+curl -X POST localhost:8099/v1/jobs -H 'Content-Type: application/json' \
   -d '{"format":1,"world":"MyWorld",
        "bounds":{"min":[-5960,0,-5510],"max":[-5897,63,-5447]},
        "ops":[{"op":"emerge"}]}'
 ```
 
-Then watch it: `curl localhost:8080/v1/jobs/1`.
+Then watch it: `curl localhost:8099/v1/jobs/1`.
 
 The mod polls every couple of seconds when idle, picks the job up, executes it,
 and reports back. Endpoints:
@@ -174,7 +178,7 @@ Or add it to a client's MCP config directly:
       "command": "uv",
       "args": ["run", "--directory", "/path/to/luantibot",
                "python", "-m", "luantibot.mcp_server"],
-      "env": { "LUANTIBOT_SERVICE_URL": "http://127.0.0.1:8080" }
+      "env": { "LUANTIBOT_SERVICE_URL": "http://127.0.0.1:8099" }
     }
   }
 }
@@ -217,12 +221,12 @@ All in `minetest.conf`.
 | --- | --- | --- |
 | `luantibot_world` | *(none)* | World directory name the mod may act in. Unset means inert. |
 | `secure.http_mods` | *(none)* | Must include `luantibot` for job polling. |
-| `luantibot_service_url` | `http://127.0.0.1:8080` | Where the builder service listens. |
+| `luantibot_service_url` | `http://127.0.0.1:8099` | Where the builder service listens. |
 | `luantibot_poll_interval` | `2` | Seconds between polls when idle. |
 | `luantibot_max_emerge_blocks` | `4096` | Mapblock cap for `/lb_emerge`. |
 
 Service flags: `--db` (default `luantibot.sqlite`), `--host` (`127.0.0.1`),
-`--port` (`8080`).
+`--port` (`8099`).
 
 ---
 

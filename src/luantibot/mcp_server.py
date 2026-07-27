@@ -22,7 +22,7 @@ from mcp.server.fastmcp import FastMCP
 from luantibot import geometry
 from luantibot.ops import FORMAT
 
-SERVICE_URL = os.environ.get("LUANTIBOT_SERVICE_URL", "http://127.0.0.1:8080")
+SERVICE_URL = os.environ.get("LUANTIBOT_SERVICE_URL", "http://127.0.0.1:8099")
 
 mcp = FastMCP(
     "luantibot",
