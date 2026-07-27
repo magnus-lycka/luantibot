@@ -153,6 +153,49 @@ and reports back. Endpoints:
 The rest (`jobs/next`, `started`, `progress`, `completed`, `failed`) are the
 mod's side of the conversation and are not meant to be called by hand.
 
+### From an AI agent (MCP)
+
+The MCP server exposes the builder as tools. It talks to the builder service
+over HTTP, so **the service must be running** for any of them to work.
+
+Register it with Claude Code:
+
+```sh
+claude mcp add luantibot -- uv run --directory /path/to/luantibot \
+    python -m luantibot.mcp_server
+```
+
+Or add it to a client's MCP config directly:
+
+```json
+{
+  "mcpServers": {
+    "luantibot": {
+      "command": "uv",
+      "args": ["run", "--directory", "/path/to/luantibot",
+               "python", "-m", "luantibot.mcp_server"],
+      "env": { "LUANTIBOT_SERVICE_URL": "http://127.0.0.1:8080" }
+    }
+  }
+}
+```
+
+Four tools:
+
+| Tool | Does |
+| --- | --- |
+| `list_worlds` | Which worlds the service knows about |
+| `emerge_area(world, x, y, z, radius)` | Queue an emerge job; returns a job id |
+| `job_status(job_id)` | State, timings and result of a job |
+| `build_history(world, limit)` | What has been built in a world, newest first |
+
+Then ask in plain language — *"emerge the area around -5900, 10, -5450 in
+MyWorld"*. Jobs are asynchronous: the tool returns a job id straight away and
+the agent can follow up with `job_status`.
+
+An oversized radius is refused at the tool, before anything is queued, so the
+agent gets told immediately rather than watching a job fail in-world.
+
 ---
 
 ## What this does to your world

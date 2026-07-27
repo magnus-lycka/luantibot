@@ -48,8 +48,7 @@ Early. The pipeline works end to end, for one operation.
 | Milestone | Delivers | Status |
 | --- | --- | --- |
 | M0 | Toolchain, test harnesses, disposable integration world | ✅ done |
-| M1.1–M1.4 | Emerge end to end: mod ↔ service ↔ SQLite, world identity, job lifecycle | ✅ done |
-| M1.5 | MCP tools, so an AI agent can drive it | planned |
+| M1 | Emerge end to end: mod ↔ service ↔ SQLite, world identity, job lifecycle, MCP tools | ✅ done |
 | M2 | `fill_box` — the first operation that writes a node | planned |
 | M3 | `fill_box_if` — conditional fill, for tunnel shells and pillars | planned |
 | M4 | Work units, progress, crash recovery | planned |
@@ -58,9 +57,9 @@ Early. The pipeline works end to end, for one operation.
 | M7 | Geometry compiler: roads, corridors, chambers, shafts | planned |
 | M8 | Lighting repair | planned |
 
-Today you can emerge mapblocks — by chat command, or by submitting a job over
-HTTP. **Nothing writes nodes yet**, and there is **no MCP surface yet**, so an
-AI agent cannot drive it without going through the HTTP API by hand.
+Today you can emerge mapblocks — by chat command, by submitting a job over HTTP,
+or by asking an AI agent through the MCP tools. **Nothing writes nodes yet**;
+that is M2.
 
 ## Getting started
 

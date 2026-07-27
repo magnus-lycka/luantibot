@@ -1,0 +1,153 @@
+"""MCP tools, exercised against a real service.
+
+The tools are thin, but they are the whole surface an agent sees, so what
+matters is that they behave sensibly against a live API and degrade readably
+when it is absent. `SERVICE_URL` is read at import, so these point the module's
+client factory at the test app instead.
+"""
+
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+from fastapi.testclient import TestClient
+
+from luantibot import mcp_server
+
+
+class _Borrowed:
+    """Lends the shared TestClient to code that owns its client.
+
+    The tools use `with _client() as c:` and would otherwise close the fixture's
+    client -- shutting down the app for every later assertion in the test.
+    """
+
+    def __init__(self, inner: TestClient) -> None:
+        self._inner = inner
+
+    def __enter__(self) -> TestClient:
+        return self._inner
+
+    def __exit__(self, *exc: object) -> bool:
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+@pytest.fixture
+def tools(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Point the tools' HTTP client at the in-process test app."""
+    monkeypatch.setattr(mcp_server, "_client", lambda: _Borrowed(client))
+    yield
+
+
+@pytest.fixture
+def broken(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    def explode() -> Any:
+        raise ConnectionError("connection refused")
+
+    monkeypatch.setattr(mcp_server, "_client", explode)
+    yield
+
+
+class TestEmergeArea:
+    def test_submits_a_job_and_reports_cost(self, tools: None) -> None:
+        result = mcp_server.emerge_area("TestWorld", 0, 0, 0, 32)
+
+        assert result["job_id"] > 0
+        # Blocks -2..2 on each axis: the cube [-32, 32] is expanded out to
+        # whole mapblocks, so 5^3 = 125 and the far corner lands on 47.
+        assert result["mapblocks"] == 125
+        assert result["bounds"] == {"min": [-32, -32, -32], "max": [47, 47, 47]}
+
+    def test_the_job_is_queued_for_the_named_world(self, tools: None, client: TestClient) -> None:
+        result = mcp_server.emerge_area("TestWorld", 0, 0, 0, 16)
+        row = client.get(f"/v1/jobs/{result['job_id']}").json()
+
+        assert row["world"] == "TestWorld"
+        assert row["state"] == "queued"
+        assert row["request"]["ops"] == [{"op": "emerge"}]
+
+    def test_refuses_an_oversized_radius_without_submitting(
+        self, tools: None, client: TestClient
+    ) -> None:
+        # The agent should be told immediately, not watch a job fail in-world.
+        result = mcp_server.emerge_area("TestWorld", 0, 0, 0, 128)
+
+        assert "error" in result
+        assert "4913" in result["error"]
+        assert client.get("/v1/worlds").json() == []
+
+    def test_rejects_a_negative_radius(self, tools: None) -> None:
+        assert "error" in mcp_server.emerge_area("TestWorld", 0, 0, 0, -1)
+
+    def test_explains_an_unreachable_service(self, broken: None) -> None:
+        result = mcp_server.emerge_area("TestWorld", 0, 0, 0, 16)
+
+        assert "error" in result
+        assert "luantibot.service" in result["hint"]
+
+
+class TestJobStatus:
+    def test_reports_state_and_result(self, tools: None, client: TestClient, world_id: int) -> None:
+        job_id = mcp_server.emerge_area("TestWorld", 0, 0, 0, 16)["job_id"]
+        client.get(f"/v1/worlds/{world_id}/jobs/next")
+        client.post(f"/v1/jobs/{job_id}/completed", json={"blocks": 27})
+
+        status = mcp_server.job_status(job_id)
+        assert status["state"] == "completed"
+        assert status["result"] == {"blocks": 27}
+        assert status["world"] == "TestWorld"
+
+    def test_surfaces_a_failure_message(
+        self, tools: None, client: TestClient, world_id: int
+    ) -> None:
+        job_id = mcp_server.emerge_area("TestWorld", 0, 0, 0, 16)["job_id"]
+        client.get(f"/v1/worlds/{world_id}/jobs/next")
+        client.post(
+            f"/v1/jobs/{job_id}/failed",
+            json={"code": "emerge_failed", "message": "3 mapblocks errored"},
+        )
+
+        status = mcp_server.job_status(job_id)
+        assert status["state"] == "failed"
+        assert status["error_code"] == "emerge_failed"
+        assert "3 mapblocks" in status["error_message"]
+
+    def test_unknown_job(self, tools: None) -> None:
+        assert "error" in mcp_server.job_status(999)
+
+
+class TestListWorlds:
+    def test_lists_registered_worlds(self, tools: None, world_id: int) -> None:
+        names = [w["name"] for w in mcp_server.list_worlds()["worlds"]]
+        assert names == ["TestWorld"]
+
+    def test_explains_an_unreachable_service(self, broken: None) -> None:
+        assert "error" in mcp_server.list_worlds()
+
+
+class TestBuildHistory:
+    def test_most_recent_first(self, tools: None) -> None:
+        first = mcp_server.emerge_area("TestWorld", 0, 0, 0, 16)["job_id"]
+        second = mcp_server.emerge_area("TestWorld", 100, 0, 100, 16)["job_id"]
+
+        jobs = mcp_server.build_history("TestWorld")["jobs"]
+        assert [j["job_id"] for j in jobs] == [second, first]
+        assert jobs[0]["ops"] == ["emerge"]
+
+    def test_is_world_scoped(self, tools: None) -> None:
+        mcp_server.emerge_area("TestWorld", 0, 0, 0, 16)
+        mcp_server.emerge_area("OtherWorld", 0, 0, 0, 16)
+
+        assert len(mcp_server.build_history("TestWorld")["jobs"]) == 1
+        assert len(mcp_server.build_history("OtherWorld")["jobs"]) == 1
+
+    def test_names_the_known_worlds_when_asked_for_a_missing_one(
+        self, tools: None, world_id: int
+    ) -> None:
+        result = mcp_server.build_history("Nowhere")
+
+        assert "error" in result
+        assert result["known_worlds"] == ["TestWorld"]

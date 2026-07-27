@@ -49,9 +49,6 @@ filterwarnings = ["error"]
 exclude_dirs = ["tests"]
 
 [tool.deptry.per_rule_ignores]
-# Declared ahead of use; delete each entry when src/ starts importing it.
-#   httpx2   -> M1.5 (MCP server is an HTTP client of the service).
-#              Also what starlette's TestClient uses in the API tests.
-#   mcp      -> M1.5
-#   uvicorn  -> never imported; invoked as a server
-DEP002 = ["httpx2", "mcp", "uvicorn"]
+# uvicorn is never imported by src/ -- it is invoked as a server by
+# luantibot.service.__main__.
+DEP002 = ["uvicorn"]

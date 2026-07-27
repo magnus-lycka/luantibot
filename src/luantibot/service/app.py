@@ -133,6 +133,11 @@ def create_app(store: Store) -> FastAPI:
         job = lookup(job_id)
         return _row(job, store.get_world(job.world_id))
 
+    @app.get("/v1/worlds/{world_id}/jobs")
+    def world_jobs(world_id: int, limit: int = 50) -> list[dict[str, Any]]:
+        world = lookup_world(world_id)
+        return [_row(j, world) for j in store.list_jobs(world_id, limit=min(limit, 200))]
+
     @app.get(
         "/v1/worlds/{world_id}/jobs/next",
         response_model=JobDocument,

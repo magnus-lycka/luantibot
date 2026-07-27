@@ -815,9 +815,29 @@ in-world triggering it — and the run asserts the service's own row reads
 `http` — idle → job → running → report → idle, plus what happens when the
 service is down (back off, don't spin).
 
-**1.5 — MCP tool.**
+**1.5 — MCP tool.** ✅ **DONE**
 One tool, `emerge_area(min, max)`, that POSTs a job and returns the id. The MCP
 server is an HTTP client of the service, not a second SQLite writer.
+
+Delivered as `mcp_server.py` with four tools — `list_worlds`, `emerge_area`,
+`job_status`, `build_history` — plus `geometry.py` and a job-history endpoint.
+Notes:
+
+- **`emerge_area` takes centre and radius**, not min/max. It mirrors
+  `/lb_emerge`, and it is what a person actually says: "the area around
+  -5900, 10, -5450". The tool converts to mapblock-aligned bounds.
+- **`geometry.py` mirrors `plan.lua`.** Both sides need mapblock arithmetic —
+  the mod to size work, the service to refuse an oversized job at submission
+  instead of letting it fail two seconds later in-world. The duplication is
+  pinned by a test asserting the Python matches values *measured from the Lua*,
+  so the two cannot drift silently.
+- **Tool docstrings are load-bearing.** They are the only thing the model reads
+  before choosing what to call, so each states what the tool does to the world
+  and what it costs — including that emerge writes terrain permanently and that
+  cost grows cubically.
+- **Errors are returned, not raised.** An unreachable service comes back as a
+  readable hint naming the command to start it, because the agent has to act on
+  it rather than see a stack trace.
 
 **Done when** you say "emerge the area around -5900, 10, -5450" to Claude, the
 mapblocks generate, and the job row in SQLite reads `completed` with a sensible

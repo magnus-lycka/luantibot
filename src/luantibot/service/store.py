@@ -92,6 +92,8 @@ class Store(Protocol):
 
     def reserve(self, world_id: int) -> Job | None: ...
 
+    def list_jobs(self, world_id: int, limit: int = 50) -> list[Job]: ...
+
     def mark_started(self, job_id: int) -> Job: ...
 
     def mark_completed(self, job_id: int, result: dict[str, Any]) -> Job: ...
@@ -145,6 +147,10 @@ class InMemoryStore:
             return self._jobs[job_id]
         except KeyError:
             raise NotFound(f"no job {job_id}") from None
+
+    def list_jobs(self, world_id: int, limit: int = 50) -> list[Job]:
+        jobs = [j for j in self._jobs.values() if j.world_id == world_id]
+        return sorted(jobs, key=lambda j: j.job_id, reverse=True)[:limit]
 
     def reserve(self, world_id: int) -> Job | None:
         self.sweep_stale()
@@ -313,6 +319,19 @@ class SqliteStore:
             if row is None:
                 raise NotFound(f"no job {job_id}")
             return self._job(row)
+
+    def list_jobs(self, world_id: int, limit: int = 50) -> list[Job]:
+        """Most recent jobs for a world -- the build history.
+
+        World-scoped because coordinates repeat across worlds, which is the
+        whole reason world_id is a column.
+        """
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM job WHERE world_id = ? ORDER BY id DESC LIMIT ?",
+                (world_id, limit),
+            ).fetchall()
+        return [self._job(r) for r in rows]
 
     def reserve(self, world_id: int) -> Job | None:
         # Sweeping on every reserve, not only at service startup, is what
