@@ -54,6 +54,24 @@ def cube(center: Vec3, radius: int) -> tuple[Vec3, Vec3]:
     )
 
 
+def slab(center_xz: tuple[int, int], side: int, y_min: int, y_max: int) -> tuple[Vec3, Vec3]:
+    """Mapblock-aligned box `side` nodes square in X/Z, spanning `y_min`..`y_max`.
+
+    The cube is the wrong shape for surface work. Terrain anyone actually wants
+    is a thin horizontal sheet, and `cube` ties the Y extent to the horizontal
+    one -- so asking for a wide area silently buys a tall one, multiplying the
+    cost by a factor nobody asked for. Here the two are independent.
+    """
+    if side <= 0:
+        raise ValueError("side must be positive")
+    if y_max < y_min:
+        y_min, y_max = y_max, y_min
+    x, z = center_xz
+    lo_x = x - side // 2
+    lo_z = z - side // 2
+    return align((lo_x, y_min, lo_z), (lo_x + side - 1, y_max, lo_z + side - 1))
+
+
 def mapblock_count(lo: Vec3, hi: Vec3) -> int:
     """Mapblocks a box touches, whole or partial.
 

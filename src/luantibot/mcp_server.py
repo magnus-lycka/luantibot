@@ -43,6 +43,15 @@ def _client() -> httpx.Client:
     return httpx.Client(base_url=SERVICE_URL, timeout=10.0)
 
 
+SECONDS_PER_MAPBLOCK = 0.0043
+"""Measured on fresh terrain: 3375 mapblocks in 14.5s, so ~230 blocks/s.
+
+The previous value here was 0.064 -- fifteen times too pessimistic, which made
+`emerge_area` quote four minutes for work that takes fifteen seconds. Estimates
+in tool descriptions get believed and planned against, so this one is measured
+rather than guessed."""
+
+
 def _service_error(exc: Exception) -> dict[str, Any]:
     return {
         "error": "the builder service is not reachable",
@@ -81,8 +90,12 @@ def emerge_area(world: str, x: int, y: int, z: int, radius: int) -> dict[str, An
 
     `radius` is in nodes and describes a cube, so cost grows cubically -- a
     radius of 64 is roughly six times the work of 32, not twice. Rough guide:
-    radius 32 is 125 mapblocks (~8s), 64 is 729 (~45s), 112 is 3375 (~4min).
-    Above ~112 the job is refused. Prefer small radii unless asked otherwise.
+    radius 32 is 125 mapblocks (~1s), 64 is 729 (~3s), 112 is 3375 (~15s).
+    Above ~112 the job is refused.
+
+    A cube is usually the wrong shape: surface terrain is a thin horizontal
+    sheet, so a radius wide enough to be useful buys far more height than you
+    need. Prefer `emerge_slab`, which sizes X/Z and Y independently.
 
     Returns a job id immediately; the work happens asynchronously. Check it with
     job_status.
@@ -92,14 +105,57 @@ def emerge_area(world: str, x: int, y: int, z: int, radius: int) -> dict[str, An
     except ValueError as exc:
         return {"error": str(exc)}
 
+    return _submit_emerge(
+        world,
+        lo,
+        hi,
+        oversize_hint="Try a radius of 112 or less, or use emerge_slab to keep Y thin.",
+    )
+
+
+@mcp.tool()
+def emerge_slab(world: str, x: int, z: int, side: int, y_min: int, y_max: int) -> dict[str, Any]:
+    """Load or generate a wide, thin horizontal slab of map.
+
+    Like `emerge_area`, this only makes terrain exist -- it places nothing and
+    leaves existing nodes untouched. The difference is shape: `side` sizes the
+    square in X/Z (centred on `x`,`z`) while `y_min`..`y_max` sets the height
+    independently, so covering ground does not drag a tall column along with it.
+
+    Cost is mapblocks -- ceil(side/16)^2 * height_in_blocks -- and generation
+    runs at roughly 230 mapblocks/s. The 4096-mapblock ceiling means a slab one
+    mapblock tall (e.g. y_min=0, y_max=15) can be 1024 nodes square; a slab 64
+    nodes tall can be 256 square.
+
+    Returns a job id immediately; check it with job_status.
+    """
+    try:
+        lo, hi = geometry.slab((x, z), side, y_min, y_max)
+    except ValueError as exc:
+        return {"error": str(exc)}
+
+    return _submit_emerge(
+        world,
+        lo,
+        hi,
+        oversize_hint=("Reduce `side`, narrow y_min..y_max, or emerge several slabs side by side."),
+    )
+
+
+def _submit_emerge(
+    world: str,
+    lo: geometry.Vec3,
+    hi: geometry.Vec3,
+    oversize_hint: str,
+) -> dict[str, Any]:
+    """Cap-check a mapblock-aligned box and queue it as an emerge job."""
     blocks = geometry.mapblock_count(lo, hi)
     if blocks > geometry.MAX_MAPBLOCKS:
         return {
             "error": (
-                f"radius {radius} spans {blocks} mapblocks, over the limit of "
-                f"{geometry.MAX_MAPBLOCKS}"
+                f"that area spans {blocks} mapblocks, over the limit of {geometry.MAX_MAPBLOCKS}"
             ),
-            "hint": "Try a radius of 112 or less, or emerge several smaller areas.",
+            "hint": oversize_hint,
         }
 
     job = {
@@ -127,7 +183,7 @@ def emerge_area(world: str, x: int, y: int, z: int, radius: int) -> dict[str, An
         "bounds": {"min": list(lo), "max": list(hi)},
         "note": (
             "Queued. The mod picks this up within a couple of seconds; "
-            f"expect roughly {max(1, round(blocks * 0.064))}s of generation."
+            f"expect roughly {max(1, round(blocks * SECONDS_PER_MAPBLOCK))}s of generation."
         ),
     }
 
