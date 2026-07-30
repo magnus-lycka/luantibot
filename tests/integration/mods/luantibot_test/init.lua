@@ -136,10 +136,9 @@ end
 local function run_checks()
     check("mod loaded", luantibot ~= nil, "global luantibot table missing")
 
-    -- Fail-closed arming: without luantibot_world matching, the mod does
-    -- nothing at all, and none of the rest of this would be reachable.
-    check("armed for this world", luantibot.armed == true, "mod refused to arm")
-
+    -- Being loaded in this world is the whole opt-in; there is no arming
+    -- setting to get wrong. What keeps work in the right world is the
+    -- world_id check in validate.lua.
     check(
         "wire format exposed",
         luantibot and luantibot.version and luantibot.version.FORMAT == 1,

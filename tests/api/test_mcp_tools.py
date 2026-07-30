@@ -151,3 +151,45 @@ class TestBuildHistory:
 
         assert "error" in result
         assert result["known_worlds"] == ["TestWorld"]
+
+
+class TestFillBox:
+    def test_submits_emerge_then_fill(self, tools: None, client: TestClient) -> None:
+        result = mcp_server.fill_box("TestWorld", 0, 0, 0, 19, 4, 19, "mcl_core:stone")
+
+        assert result["job_id"] > 0
+        row = client.get(f"/v1/jobs/{result['job_id']}").json()
+
+        # Terrain has to exist before it can be overwritten, so every fill
+        # carries its own emerge.
+        assert row["request"]["ops"] == [
+            {"op": "emerge"},
+            {"op": "fill_box", "min": [0, 0, 0], "max": [19, 4, 19], "node": 0},
+        ]
+        assert row["request"]["palette"] == ["mcl_core:stone"]
+
+    def test_bounds_are_rounded_out_but_the_box_is_not(self, tools: None) -> None:
+        """The emerged region snaps to mapblocks; what gets written must not."""
+        result = mcp_server.fill_box("TestWorld", 1, 1, 1, 2, 2, 2, "air")
+
+        assert result["bounds"] == {"min": [0, 0, 0], "max": [15, 15, 15]}
+        assert result["mapblocks"] == 1
+
+    def test_accepts_corners_in_any_order(self, tools: None, client: TestClient) -> None:
+        result = mcp_server.fill_box("TestWorld", 19, 4, 19, 0, 0, 0, "air")
+        row = client.get(f"/v1/jobs/{result['job_id']}").json()
+
+        assert row["request"]["ops"][1]["min"] == [0, 0, 0]
+        assert row["request"]["ops"][1]["max"] == [19, 4, 19]
+
+    def test_refuses_an_oversized_box_without_submitting(
+        self, tools: None, client: TestClient
+    ) -> None:
+        result = mcp_server.fill_box("TestWorld", 0, 0, 0, 2000, 200, 2000, "air")
+
+        assert "error" in result
+        assert client.get("/v1/worlds").json() == []
+
+    def test_reports_a_missing_service_readably(self, broken: None) -> None:
+        result = mcp_server.fill_box("TestWorld", 0, 0, 0, 1, 1, 1, "air")
+        assert "not reachable" in result["error"]

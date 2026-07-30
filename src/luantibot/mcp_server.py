@@ -156,7 +156,19 @@ def _submit_emerge(
     hi: geometry.Vec3,
     oversize_hint: str,
 ) -> dict[str, Any]:
-    """Cap-check a mapblock-aligned box and queue it as an emerge job."""
+    """Queue a job that only generates terrain."""
+    return _submit(world, lo, hi, [{"op": "emerge"}], [], oversize_hint)
+
+
+def _submit(
+    world: str,
+    lo: geometry.Vec3,
+    hi: geometry.Vec3,
+    ops: list[dict[str, Any]],
+    palette: list[str],
+    oversize_hint: str,
+) -> dict[str, Any]:
+    """Cap-check a mapblock-aligned box and queue it as a job."""
     blocks = geometry.mapblock_count(lo, hi)
     chunks = geometry.mapgen_chunks(lo, hi)
     if blocks > geometry.MAX_MAPBLOCKS:
@@ -170,8 +182,9 @@ def _submit_emerge(
     job = {
         "format": FORMAT,
         "world": world,
+        "palette": palette,
         "bounds": {"min": list(lo), "max": list(hi)},
-        "ops": [{"op": "emerge"}],
+        "ops": ops,
     }
 
     try:
@@ -195,6 +208,51 @@ def _submit_emerge(
             f"expect roughly {max(1, round(chunks * SECONDS_PER_CHUNK))}s of generation."
         ),
     }
+
+
+@mcp.tool()
+def fill_box(
+    world: str,
+    x1: int,
+    y1: int,
+    z1: int,
+    x2: int,
+    y2: int,
+    z2: int,
+    node: str,
+) -> dict[str, Any]:
+    """Set every node in a box to one node type. THIS CHANGES THE WORLD.
+
+    Unlike the emerge tools, this destroys whatever was there. The corners are
+    inclusive, given in any order, and name actual nodes -- the box is exactly
+    what you specify, not rounded outward. The surrounding mapblocks are
+    generated first if they do not exist yet.
+
+    `node` is a registered node name for the game in that world, such as
+    "mcl_core:stone" or "air" under Mineclonia. An unregistered name fails the
+    job without writing anything. Filling with "air" is how you carve.
+
+    Nodes are written raw: no lighting update, no liquid flow, and node
+    callbacks do not run, so filling a box with a liquid gives you a static
+    block of it rather than something that spreads.
+
+    Returns a job id immediately; check it with job_status.
+    """
+    lo, hi = geometry.align((x1, y1, z1), (x2, y2, z2))
+    box_lo = (min(x1, x2), min(y1, y2), min(z1, z2))
+    box_hi = (max(x1, x2), max(y1, y2), max(z1, z2))
+
+    return _submit(
+        world,
+        lo,
+        hi,
+        [
+            {"op": "emerge"},
+            {"op": "fill_box", "min": list(box_lo), "max": list(box_hi), "node": 0},
+        ],
+        [node],
+        oversize_hint="Fill a smaller box, or split it into several jobs.",
+    )
 
 
 @mcp.tool()

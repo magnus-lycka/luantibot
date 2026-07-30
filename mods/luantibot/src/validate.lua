@@ -4,8 +4,9 @@
 -- everything here fails closed: anything not positively known to be valid is
 -- rejected.
 --
--- Covers rules 1, 2 and 5-7 of the wire contract. Rules 3 and 4 (palette
--- resolution, op vocabulary) arrive in M2 with the ops that need them. See
+-- Covers rules 1, 2 and 4-7 of the wire contract. Rule 3 (palette resolution)
+-- lives in palette.lua, which is the only module that can resolve a name to a
+-- content id and so the only one that can tell whether an entry is real. See
 -- "Wire contract" in docs/implementation_plan.md.
 --
 -- A factory rather than a plain table, because `require()` is disabled under
@@ -80,6 +81,74 @@ return function(deps)
         return nil
     end
 
+    --- Rule 5, for one op's box: well formed, and inside the job's `bounds`.
+    ---
+    --- Containment is not a formality. `bounds` is what gets emerged and what
+    --- the VoxelManip covers, so an op reaching outside it would be silently
+    --- clipped by apply.lua and build something other than what was asked for.
+    --- Refusing is the only way the caller finds out.
+    local function check_box(op, index, lo, hi)
+        local a = corner(op.min)
+        local b = corner(op.max)
+        if not a or not b then
+            return "bad_box", string.format("op %d: min and max must each be three integers", index)
+        end
+
+        for _, axis in ipairs({ "x", "y", "z" }) do
+            if a[axis] > b[axis] then
+                return "bad_box", string.format("op %d: min exceeds max on %s", index, axis)
+            end
+            if a[axis] < lo[axis] or b[axis] > hi[axis] then
+                return "box_outside_bounds",
+                    string.format("op %d: box reaches outside the job bounds on %s", index, axis)
+            end
+        end
+
+        return nil
+    end
+
+    --- What each op type requires beyond its box. Rule 4 is membership of this
+    --- table: an op this mod does not implement is refused rather than skipped,
+    --- so a job written against a newer service does not half-execute.
+    local op_checks = {
+        emerge = function()
+            return nil
+        end,
+
+        fill_box = function(op, index, lo, hi)
+            local code, message = check_box(op, index, lo, hi)
+            if code then
+                return code, message
+            end
+            -- The palette index only has to be a sane integer here; whether it
+            -- names an entry is settled by palette.lua once the palette is
+            -- resolved, which is the only place that knows the size.
+            if not is_int(op.node) or op.node < 0 then
+                return "bad_op",
+                    string.format("op %d: node must be a non-negative palette index", index)
+            end
+            return nil
+        end,
+    }
+
+    --- @return string|nil code, string|nil message
+    local function check_ops(job, lo, hi)
+        for i, op in ipairs(job.ops) do
+            if type(op) ~= "table" then
+                return "bad_ops", string.format("op %d is not a table", i)
+            end
+            local check = op_checks[op.op]
+            if not check then
+                return "unknown_op", string.format("op %d: unknown op %q", i, tostring(op.op))
+            end
+            local code, message = check(op, i, lo, hi)
+            if code then
+                return code, message
+            end
+        end
+        return nil
+    end
+
     --- Check a job document against this server's identity and limits.
     --- @param job table the decoded job document
     --- @param ctx table { world_id = <registered id or nil>, max_blocks = <cap> }
@@ -118,6 +187,14 @@ return function(deps)
             return false, code, message
         end
 
+        -- After check_bounds, so op containment is compared against corners
+        -- already known to be well formed.
+        local lo, hi = validate.positions(job)
+        code, message = check_ops(job, lo, hi)
+        if code then
+            return false, code, message
+        end
+
         return true
     end
 
@@ -125,6 +202,34 @@ return function(deps)
     --- @return table p1, table p2
     function validate.positions(job)
         return corner(job.bounds.min), corner(job.bounds.max)
+    end
+
+    --- The op list with every box converted from wire arrays to positions.
+    ---
+    --- On the wire a corner is `[x, y, z]`, which `core.parse_json` hands over
+    --- as `{[1]=x, [2]=y, [3]=z}`; the pure modules and the engine both use
+    --- `{x=, y=, z=}`. Something has to translate, and doing it here means it
+    --- happens once, in the module that has already checked every corner is
+    --- three integers -- rather than in each op handler, differently.
+    ---
+    --- Returns copies. The job document is what gets reported back, so it keeps
+    --- the shape it arrived in.
+    --- @param job table a job that has passed validate.job
+    --- @return table ops
+    function validate.ops_as_positions(job)
+        local out = {}
+        for i, op in ipairs(job.ops) do
+            local copy = {}
+            for k, v in pairs(op) do
+                copy[k] = v
+            end
+            if op.min ~= nil then
+                copy.min = corner(op.min)
+                copy.max = corner(op.max)
+            end
+            out[i] = copy
+        end
+        return out
     end
 
     return validate

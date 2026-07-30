@@ -51,6 +51,32 @@ def job_doc() -> dict[str, Any]:
 
 
 @pytest.fixture
+def fill_job() -> Callable[..., dict[str, Any]]:
+    """Factory for a job that emerges a region and fills a box inside it (M2).
+
+    A factory rather than a plain dict because most of these tests vary one
+    field and keep the rest valid, and a shared mutable dict would let one
+    test's edit leak into the next.
+    """
+
+    def _fill_job(**overrides: Any) -> dict[str, Any]:
+        doc: dict[str, Any] = {
+            "format": 1,
+            "world": WORLD_NAME,
+            "palette": ["air", "mcl_core:stone"],
+            "bounds": {"min": [0, 0, 0], "max": [31, 31, 31]},
+            "ops": [
+                {"op": "emerge"},
+                {"op": "fill_box", "min": [1, 1, 1], "max": [20, 5, 20], "node": 1},
+            ],
+        }
+        doc.update(overrides)
+        return doc
+
+    return _fill_job
+
+
+@pytest.fixture
 def submit(client: TestClient) -> Callable[[dict[str, Any]], int]:
     """Submit a job and return its id, asserting the submission succeeded."""
 

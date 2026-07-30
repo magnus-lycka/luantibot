@@ -59,14 +59,33 @@ class Bounds(Strict):
 class EmergeOp(Strict):
     """Load or generate the mapblocks covering the job's bounds. Writes nothing.
 
-    Ops carry no bounds of their own at M1; `emerge` applies to the whole job.
-    Box-carrying ops arrive in M2.
+    Carries no box of its own: `emerge` always applies to the whole job.
     """
 
     op: Literal["emerge"]
 
 
-Op = Annotated[EmergeOp, Field(discriminator="op")]
+class FillBoxOp(Strict):
+    """Set every node in a box to one palette entry.
+
+    `node` is a 0-based index into the job's `palette`, not a node name. Names
+    are resolved to content ids once, in the mod, so that a typo fails the job
+    before anything is written rather than once per op.
+    """
+
+    op: Literal["fill_box"]
+    min: Vec3
+    max: Vec3
+    node: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def well_formed(self) -> FillBoxOp:
+        if any(lo > hi for lo, hi in zip(self.min, self.max, strict=True)):
+            raise ValueError("op min must not exceed max on any axis")
+        return self
+
+
+Op = Annotated[EmergeOp | FillBoxOp, Field(discriminator="op")]
 
 
 class JobRequest(Strict):
@@ -77,6 +96,38 @@ class JobRequest(Strict):
     palette: list[str] = Field(default_factory=list)
     bounds: Bounds
     ops: list[Op] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def ops_fit_the_job(self) -> JobRequest:
+        """Rules 3 and 5, as far as the service can check them.
+
+        It cannot tell whether a palette entry names a registered node -- only
+        the mod can -- but it can catch an index with no entry behind it and a
+        box reaching outside what will be emerged. Both are pure arithmetic, and
+        catching them here turns a job that fails two seconds later in-world
+        into a 422 at submission.
+        """
+        for i, op in enumerate(self.ops):
+            if not isinstance(op, FillBoxOp):
+                continue
+
+            if op.node >= len(self.palette):
+                raise ValueError(
+                    f"op {i}: node index {op.node} is outside a palette of {len(self.palette)}"
+                )
+
+            outside = [
+                axis
+                for axis, lo, hi, blo, bhi in zip(
+                    "xyz", op.min, op.max, self.bounds.min, self.bounds.max, strict=True
+                )
+                if lo < blo or hi > bhi
+            ]
+            if outside:
+                raise ValueError(
+                    f"op {i}: box reaches outside the job bounds on {', '.join(outside)}"
+                )
+        return self
 
 
 class JobDocument(JobRequest):

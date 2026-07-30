@@ -13,9 +13,22 @@ local plan = load("plan")
 local emerge = load("emerge")
 local parse = load("parse")
 local identity = load("identity")
+local apply = load("apply")
 local validate = load("validate")({ version = version, plan = plan })
 local poll = load("poll")
-local world = load("world")({ emerge = emerge })
+local world = load("world")({ emerge = emerge, apply = apply })
+
+-- `core.get_content_id` raises on a name the game never registered, so the
+-- registry is consulted first: palette.lua wants nil for "no such node", not an
+-- error that would take the whole globalstep down with it.
+local palette = load("palette")({
+    resolve = function(name)
+        if core.registered_nodes[name] == nil then
+            return nil
+        end
+        return core.get_content_id(name)
+    end,
+})
 
 -- MUST be at load time. core.request_http_api() returns nil if called later,
 -- or if this mod is not listed in secure.http_mods.
@@ -28,25 +41,22 @@ local LOCAL_WORLD = identity.world_name_from_path(core.get_worldpath())
 local BASE_URL = settings:get("luantibot_service_url") or "http://127.0.0.1:8099"
 local MAX_EMERGE_BLOCKS = tonumber(settings:get("luantibot_max_emerge_blocks")) or 4096
 
+-- Empty by default, and deliberately so: rule 3 is a deny list, not an
+-- allow-list. VoxelManip writes bypass node callbacks, so the frightening nodes
+-- mostly are not -- add an entry when something actually surprises you. See "On
+-- node validation" in docs/implementation_plan.md.
+local DENY = palette.deny_set(settings:get("luantibot_deny_nodes"))
+
 luantibot = {
     version = version,
     plan = plan,
     world = world,
+    apply = apply,
+    palette = palette,
     identity = identity,
     validate = validate,
     local_world = LOCAL_WORLD,
 }
-
--- Fail closed. A mod installed into the global mods directory rather than one
--- world's worldmods would otherwise be live in every world at once, including
--- the real one.
-local armed, why = identity.armed(settings:get("luantibot_world"), LOCAL_WORLD)
-if not armed then
-    core.log("warning", "[luantibot] inactive: " .. why)
-    luantibot.armed = false
-    return
-end
-luantibot.armed = true
 
 -- Logged before the HTTP gate below, so this line appears whether or not the
 -- service is configured. It is what INSTALL.md tells people to look for.
@@ -161,10 +171,11 @@ local function run_job(job)
         return
     end
 
-    -- M1 executes exactly one op type, and it writes nothing.
-    local op = job.ops[1]
-    if not op or op.op ~= "emerge" then
-        fail_job(job, "unknown_op", "only 'emerge' is supported at M1")
+    -- Rule 3. Resolved once, before anything is written, so an unregistered
+    -- name fails the job rather than one op of it.
+    local pal, pcode, pmessage = palette.compile(job.palette or {}, DENY)
+    if not pal then
+        fail_job(job, pcode, pmessage)
         return
     end
 
@@ -175,26 +186,41 @@ local function run_job(job)
     -- and after a crash that distinction is what separates "died before
     -- starting" from "died mid-job".
     poller:report(string.format("/v1/jobs/%d/started", job.job_id), {})
-    core.log("action", string.format("[luantibot] job %d: emerging", job.job_id))
 
-    world.emerge(p1, p2, function(result)
+    -- An emerge-only job never touches a VoxelManip. Reading one back would
+    -- mark every mapblock in the region modified and force it to be re-saved,
+    -- which is the opposite of what a generate-terrain job is for.
+    local writes = apply.writes(job.ops)
+    core.log(
+        "action",
+        string.format("[luantibot] job %d: %s", job.job_id, writes and "building" or "emerging")
+    )
+
+    local function finished(result)
         local ms = math.floor((core.get_us_time() - started) / 1000)
         if not result.ok then
-            fail_job(job, "emerge_failed", result.error)
+            fail_job(job, result.code or "emerge_failed", result.error)
             return
         end
         core.log(
             "action",
             string.format(
-                "[luantibot] job %d: %d mapblocks in %d ms",
+                "[luantibot] job %d: %d mapblocks, %d nodes in %d ms",
                 job.job_id,
                 result.blocks,
+                result.written or 0,
                 ms
             )
         )
         luantibot.stats.jobs_done = luantibot.stats.jobs_done + 1
-        poller:finish(true, { blocks = result.blocks, ms = ms })
-    end)
+        poller:finish(true, { blocks = result.blocks, nodes = result.written or 0, ms = ms })
+    end
+
+    if writes then
+        world.build(p1, p2, validate.ops_as_positions(job), pal, finished)
+    else
+        world.emerge(p1, p2, finished)
+    end
 end
 
 local function handle(event)

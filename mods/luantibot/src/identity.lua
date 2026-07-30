@@ -8,11 +8,17 @@
 -- about keeping that binding visible and safe. See "World identity" in
 -- docs/implementation_plan.md.
 
-local identity = {}
+-- There is deliberately no arming setting. Installing the mod in a world's
+-- `worldmods`, or enabling it there, is already a per-world act of intent, and a
+-- second registry of world names could only ever disagree with it -- silently,
+-- since a disarmed mod loads fine and merely leaves jobs sitting in the queue.
+--
+-- What protects a world it should not build in is structural, not configured:
+-- the service never offers a job for another world, and the mod checks
+-- `world_id` before touching a node. See "Routing and the world check" in
+-- docs/implementation_plan.md.
 
-local function trim(s)
-    return (tostring(s or ""):gsub("^%s*(.-)%s*$", "%1"))
-end
+local identity = {}
 
 --- Last segment of a world path, which is the world's directory name.
 --- @param path string
@@ -20,32 +26,6 @@ end
 function identity.world_name_from_path(path)
     local cleaned = tostring(path or ""):gsub("[/\\]+$", "")
     return cleaned:match("([^/\\]+)$") or cleaned
-end
-
---- May the mod act in this world at all?
----
---- Fail-closed on purpose. A mod installed into the global mods directory
---- rather than a single world's `worldmods` would otherwise be live in every
---- world at once, including the real one.
---- @param configured string|nil value of the `luantibot_world` setting
---- @param local_world string world directory name of the running server
---- @return boolean armed, string|nil reason when not armed
-function identity.armed(configured, local_world)
-    local want = trim(configured)
-    if want == "" then
-        return false,
-            "luantibot_world is not set; refusing to act in any world. "
-                .. "Set it to this world's directory name to arm the mod."
-    end
-    if want ~= local_world then
-        return false,
-            string.format(
-                "luantibot_world is %q but this world is %q; refusing to act",
-                want,
-                local_world
-            )
-    end
-    return true
 end
 
 --- Warn if the service's label and the local directory name have drifted.

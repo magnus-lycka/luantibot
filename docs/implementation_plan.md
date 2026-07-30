@@ -789,9 +789,12 @@ belongs here rather than in M2 because M1.4 is the first milestone where the mod
 executes work it did not originate, and M2 is the first that writes nodes — the
 guard has to exist before the thing it guards against.
 
-Plus a fail-closed `luantibot_world` setting checked against the local world
-directory name, so a mod installed globally rather than per-world does nothing
-until deliberately armed.
+M1.4 also shipped a fail-closed `luantibot_world` setting, naming the one world
+the mod would act in. **Removed after M2.** A single global world name capped the
+system at one world, contradicting the per-`world_id` routing that exists so
+several servers can build at once — and it failed silently, since a disarmed mod
+loads normally and merely leaves its jobs queued. Installing the mod in a world
+is the opt-in; the world check above is what makes that safe.
 
 Delivered as pure `poll.lua`, `identity.lua`, `validate.lua`; adapters
 `client.lua`, `storage.lua`; and the wiring in `init.lua`. 75 Lua tests. The

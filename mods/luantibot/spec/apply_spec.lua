@@ -1,0 +1,305 @@
+local apply = require("apply")
+
+local function p(x, y, z)
+    return { x = x, y = y, z = z }
+end
+
+--- A stand-in for Luanti's VoxelArea, using its actual index formula.
+---
+--- Deliberately not a permissive stub: `apply.fill_box` indexes once per row and
+--- then walks x by increments, so a fake that ignored the stride layout would
+--- let a wrong assumption pass. This one reproduces the engine's arithmetic, so
+--- the tests fail if that assumption ever stops holding.
+local function area(min, max)
+    local ystride = max.x - min.x + 1
+    local zstride = ystride * (max.y - min.y + 1)
+    return {
+        MinEdge = min,
+        MaxEdge = max,
+        ystride = ystride,
+        zstride = zstride,
+        index = function(self, x, y, z)
+            return (z - self.MinEdge.z) * zstride
+                + (y - self.MinEdge.y) * ystride
+                + (x - self.MinEdge.x)
+                + 1
+        end,
+    }
+end
+
+--- An array of `fill` covering the whole area, so a stray write is visible.
+local function blank(a, fill)
+    local n = (a.MaxEdge.x - a.MinEdge.x + 1)
+        * (a.MaxEdge.y - a.MinEdge.y + 1)
+        * (a.MaxEdge.z - a.MinEdge.z + 1)
+    local data = {}
+    for i = 1, n do
+        data[i] = fill
+    end
+    return data
+end
+
+--- Every position in the area whose value is not `fill`, as "x,y,z" strings.
+local function changed(data, a, fill)
+    local out = {}
+    for z = a.MinEdge.z, a.MaxEdge.z do
+        for y = a.MinEdge.y, a.MaxEdge.y do
+            for x = a.MinEdge.x, a.MaxEdge.x do
+                if data[a:index(x, y, z)] ~= fill then
+                    out[#out + 1] = string.format("%d,%d,%d", x, y, z)
+                end
+            end
+        end
+    end
+    table.sort(out)
+    return out
+end
+
+describe("apply.fill_box", function()
+    local a, data
+    before_each(function()
+        a = area(p(0, 0, 0), p(3, 3, 3))
+        data = blank(a, 0)
+    end)
+
+    it("writes a single-node box", function()
+        assert.are.equal(1, apply.fill_box(data, a, p(1, 2, 3), p(1, 2, 3), 7))
+        assert.are.same({ "1,2,3" }, changed(data, a, 0))
+        assert.are.equal(7, data[a:index(1, 2, 3)])
+    end)
+
+    it("writes every node of a larger box and nothing else", function()
+        assert.are.equal(8, apply.fill_box(data, a, p(0, 0, 0), p(1, 1, 1), 5))
+        assert.are.same({
+            "0,0,0",
+            "0,0,1",
+            "0,1,0",
+            "0,1,1",
+            "1,0,0",
+            "1,0,1",
+            "1,1,0",
+            "1,1,1",
+        }, changed(data, a, 0))
+    end)
+
+    it("fills the whole area", function()
+        assert.are.equal(64, apply.fill_box(data, a, p(0, 0, 0), p(3, 3, 3), 9))
+        assert.are.equal(64, #changed(data, a, 0))
+    end)
+
+    it("accepts corners in any order", function()
+        assert.are.equal(8, apply.fill_box(data, a, p(1, 1, 1), p(0, 0, 0), 5))
+        assert.are.equal(5, data[a:index(0, 0, 0)])
+        assert.are.equal(5, data[a:index(1, 1, 1)])
+    end)
+
+    -- The two cases the plan calls out as where index bugs live.
+    it("clips a box that overhangs the area", function()
+        assert.are.equal(8, apply.fill_box(data, a, p(2, 2, 2), p(9, 9, 9), 4))
+        assert.are.same({
+            "2,2,2",
+            "2,2,3",
+            "2,3,2",
+            "2,3,3",
+            "3,2,2",
+            "3,2,3",
+            "3,3,2",
+            "3,3,3",
+        }, changed(data, a, 0))
+    end)
+
+    it("clips a box that overhangs the low corner", function()
+        assert.are.equal(1, apply.fill_box(data, a, p(-5, -5, -5), p(0, 0, 0), 4))
+        assert.are.same({ "0,0,0" }, changed(data, a, 0))
+    end)
+
+    it("writes nothing for a box entirely outside", function()
+        assert.are.equal(0, apply.fill_box(data, a, p(10, 10, 10), p(20, 20, 20), 4))
+        assert.are.same({}, changed(data, a, 0))
+    end)
+
+    it("writes nothing for a box outside on one axis only", function()
+        assert.are.equal(0, apply.fill_box(data, a, p(0, 99, 0), p(3, 99, 3), 4))
+        assert.are.same({}, changed(data, a, 0))
+    end)
+
+    it("handles an area not anchored at the origin", function()
+        local b = area(p(-16, -16, -16), p(-13, -13, -13))
+        local d = blank(b, 0)
+        assert.are.equal(1, apply.fill_box(d, b, p(-16, -16, -16), p(-16, -16, -16), 3))
+        assert.are.same({ "-16,-16,-16" }, changed(d, b, 0))
+        assert.are.equal(3, d[1])
+    end)
+
+    it("stays inside the array when filling the far corner", function()
+        local b = area(p(-2, -2, -2), p(1, 1, 1))
+        local d = blank(b, 0)
+        apply.fill_box(d, b, p(1, 1, 1), p(1, 1, 1), 6)
+        assert.are.equal(6, d[64])
+        assert.are.equal(nil, d[65])
+    end)
+
+    it("applies later ops over earlier ones at the same cell", function()
+        apply.fill_box(data, a, p(0, 0, 0), p(3, 3, 3), 1)
+        apply.fill_box(data, a, p(1, 1, 1), p(2, 2, 2), 2)
+        assert.are.equal(1, data[a:index(0, 0, 0)])
+        assert.are.equal(2, data[a:index(1, 1, 1)])
+        assert.are.equal(2, data[a:index(2, 2, 2)])
+        assert.are.equal(1, data[a:index(3, 3, 3)])
+    end)
+end)
+
+--- A palette that maps wire index n to content id 100 + n.
+local function fake_palette(size)
+    return {
+        size = size,
+        id = function(_, index)
+            if index < 0 or index >= size then
+                return nil,
+                    string.format("palette index %d is outside a palette of %d", index, size)
+            end
+            return 100 + index
+        end,
+    }
+end
+
+describe("apply.run", function()
+    local a, data, pal
+    before_each(function()
+        a = area(p(0, 0, 0), p(3, 3, 3))
+        data = blank(a, 0)
+        pal = fake_palette(2)
+    end)
+
+    it("ignores emerge, which is already satisfied by then", function()
+        assert.are.equal(0, apply.run(data, a, { { op = "emerge" } }, pal))
+        assert.are.same({}, changed(data, a, 0))
+    end)
+
+    it("applies a single fill_box through the palette", function()
+        local ops = { { op = "fill_box", min = p(1, 1, 1), max = p(1, 1, 1), node = 1 } }
+        assert.are.equal(1, apply.run(data, a, ops, pal))
+        assert.are.equal(101, data[a:index(1, 1, 1)])
+    end)
+
+    -- Original order is the contract. Shell before carve depends on it.
+    it("applies ops in the order given, later winning at a shared cell", function()
+        local ops = {
+            { op = "fill_box", min = p(0, 0, 0), max = p(3, 3, 3), node = 1 },
+            { op = "fill_box", min = p(1, 1, 1), max = p(2, 2, 2), node = 0 },
+        }
+        assert.are.equal(64 + 8, apply.run(data, a, ops, pal))
+        assert.are.equal(101, data[a:index(0, 0, 0)])
+        assert.are.equal(100, data[a:index(1, 1, 1)])
+        assert.are.equal(101, data[a:index(3, 3, 3)])
+    end)
+
+    it("reports the total nodes written across ops", function()
+        local ops = {
+            { op = "emerge" },
+            { op = "fill_box", min = p(0, 0, 0), max = p(1, 1, 1), node = 0 },
+            { op = "fill_box", min = p(2, 2, 2), max = p(3, 3, 3), node = 1 },
+        }
+        assert.are.equal(16, apply.run(data, a, ops, pal))
+    end)
+
+    it("fails on a palette index with no entry behind it", function()
+        local ops = { { op = "fill_box", min = p(0, 0, 0), max = p(1, 1, 1), node = 5 } }
+        local n, code, message = apply.run(data, a, ops, pal)
+        assert.is_nil(n)
+        assert.are.equal("bad_node", code)
+        assert.matches("op 1", message)
+    end)
+
+    it("stops at the failing op rather than applying the rest", function()
+        local ops = {
+            { op = "fill_box", min = p(0, 0, 0), max = p(0, 0, 0), node = 0 },
+            { op = "fill_box", min = p(1, 1, 1), max = p(1, 1, 1), node = 9 },
+            { op = "fill_box", min = p(2, 2, 2), max = p(2, 2, 2), node = 1 },
+        }
+        local n, code = apply.run(data, a, ops, pal)
+        assert.is_nil(n)
+        assert.are.equal("bad_node", code)
+        assert.are.equal(0, data[a:index(2, 2, 2)])
+    end)
+
+    -- validate.lua refuses these first; this is the drift guard behind it.
+    it("fails on an op with no handler", function()
+        local n, code = apply.run(data, a, { { op = "summon_dragon" } }, pal)
+        assert.is_nil(n)
+        assert.are.equal("unknown_op", code)
+    end)
+end)
+
+-- The seam that shipped a crash: ops arrive from core.parse_json with array
+-- corners, `{[1]=x, [2]=y, [3]=z}`, while everything below expects `{x=,y=,z=}`.
+-- Every test above uses positions, so none of them could have caught it. These
+-- start from a document shaped exactly as the wire delivers one.
+describe("wire ops through validate into apply", function()
+    local validate = require("validate")({
+        version = require("version"),
+        plan = require("plan"),
+    })
+
+    local function wire_job(ops)
+        return {
+            format = 1,
+            job_id = 7,
+            world_id = 3,
+            world = "TestWorld",
+            palette = { "stone" },
+            bounds = { min = { 0, 0, 0 }, max = { 15, 15, 15 } },
+            ops = ops,
+        }
+    end
+
+    local a, data, pal
+    before_each(function()
+        a = area(p(0, 0, 0), p(3, 3, 3))
+        data = blank(a, 0)
+        pal = fake_palette(2)
+    end)
+
+    it("converts array corners to positions", function()
+        local job =
+            wire_job({ { op = "fill_box", min = { 1, 2, 3 }, max = { 4, 5, 6 }, node = 0 } })
+        local ops = validate.ops_as_positions(job)
+        assert.are.same(p(1, 2, 3), ops[1].min)
+        assert.are.same(p(4, 5, 6), ops[1].max)
+        assert.are.equal("fill_box", ops[1].op)
+        assert.are.equal(0, ops[1].node)
+    end)
+
+    it("leaves the job document in the shape it arrived in", function()
+        local job =
+            wire_job({ { op = "fill_box", min = { 1, 2, 3 }, max = { 4, 5, 6 }, node = 0 } })
+        validate.ops_as_positions(job)
+        assert.are.same({ 1, 2, 3 }, job.ops[1].min)
+    end)
+
+    it("passes emerge through untouched", function()
+        local ops = validate.ops_as_positions(wire_job({ { op = "emerge" } }))
+        assert.are.same({ { op = "emerge" } }, ops)
+    end)
+
+    it("applies a wire-shaped fill_box to the right cells", function()
+        local job = wire_job({
+            { op = "emerge" },
+            { op = "fill_box", min = { 1, 1, 1 }, max = { 2, 2, 2 }, node = 1 },
+        })
+        assert.is_true(validate.job(job, { world_id = 3, max_blocks = 4096 }))
+
+        local written = apply.run(data, a, validate.ops_as_positions(job), pal)
+        assert.are.equal(8, written)
+        assert.are.same({
+            "1,1,1",
+            "1,1,2",
+            "1,2,1",
+            "1,2,2",
+            "2,1,1",
+            "2,1,2",
+            "2,2,1",
+            "2,2,2",
+        }, changed(data, a, 0))
+    end)
+end)

@@ -1,34 +1,10 @@
 local identity = require("identity")
 
-describe("identity.armed", function()
-    -- Fail closed: a mod installed globally rather than per-world must do
-    -- nothing until deliberately pointed at a world.
-    it("refuses when unconfigured", function()
-        local ok, why = identity.armed(nil, "TestWorld")
-        assert.is_false(ok)
-        assert.is_string(why)
-    end)
-
-    it("refuses when the configured world is blank", function()
-        assert.is_false(identity.armed("", "TestWorld"))
-        assert.is_false(identity.armed("   ", "TestWorld"))
-    end)
-
-    it("refuses when configured for a different world", function()
-        local ok, why = identity.armed("TestWorld", "SomeOtherWorld")
-        assert.is_false(ok)
-        assert.is_truthy(why:find("TestWorld"))
-        assert.is_truthy(why:find("SomeOtherWorld"))
-    end)
-
-    it("arms when the configured world matches", function()
-        assert.is_true(identity.armed("TestWorld", "TestWorld"))
-    end)
-
-    it("ignores surrounding whitespace in configuration", function()
-        assert.is_true(identity.armed("  TestWorld  ", "TestWorld"))
-    end)
-end)
+-- `identity.armed` and the `luantibot_world` setting behind it are gone on
+-- purpose. A single global world name capped the system at one world, which
+-- contradicts routing jobs per `world_id` so several servers can build at once.
+-- Installing the mod in a world is the intent; what keeps it from building in
+-- the wrong one is the world_id check in validate.lua, covered by its own spec.
 
 describe("identity.world_name_from_path", function()
     it("takes the last path segment", function()

@@ -64,7 +64,7 @@ that is M2.
 ## Getting started
 
 See **[INSTALL.md](INSTALL.md)**. The short version: symlink the mod into a
-world, set `luantibot_world` to that world's directory name, restart, and
+world's `worldmods`, restart, and
 
 ```text
 /lb_emerge -5900 10 -5450 32

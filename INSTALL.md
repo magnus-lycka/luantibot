@@ -32,17 +32,13 @@ A symlink means `git pull` updates the mod; you only need to restart the server.
 
 ## 2. Arm it
 
-The mod is **fail-closed**: it loads, logs `inactive:`, and registers nothing
-until you name the world it may act in. Add to
-`~/Library/Application Support/minetest/minetest.conf`:
+There is nothing to configure to arm the mod. Symlinking it into a world's
+`worldmods` is the opt-in: that world registers itself on startup and polls for
+its own jobs, and several worlds can run at once, each with its own id.
 
-```ini
-luantibot_world = MyWorld
-```
-
-The value is the world's **directory name**, which is what appears under
-`worlds/`. It is safe to leave this in your global config — open any other world
-and the mod stays inert, because the name will not match.
+What keeps a world from executing work meant for another is not configuration.
+The service only ever offers a world its own jobs, and the mod compares
+`world_id` before touching a node.
 
 Start the server and check the log. Without the service configured you will see:
 
@@ -54,8 +50,11 @@ WARNING[Main]: [luantibot] no HTTP API; /lb_emerge works but job polling is off.
 That warning is expected and harmless at this stage — `/lb_emerge` is a local
 operation and works without the service.
 
-If instead you see `[luantibot] inactive: ...`, the `luantibot_world` setting is
-missing or does not match the directory name, and nothing is registered.
+The line after it reports which world you are in and the id the service gave it:
+
+```text
+ACTION[Main]:  [luantibot] world_id=3 "MyWorld" (dir: MyWorld)
+```
 
 ## 3. Optionally: the builder service
 
@@ -219,7 +218,6 @@ All in `minetest.conf`.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `luantibot_world` | *(none)* | World directory name the mod may act in. Unset means inert. |
 | `secure.http_mods` | *(none)* | Must include `luantibot` for job polling. |
 | `luantibot_service_url` | `http://127.0.0.1:8099` | Where the builder service listens. |
 | `luantibot_poll_interval` | `2` | Seconds between polls when idle. |
@@ -255,12 +253,9 @@ their histories, silently. The name you pass is the decision.
 
 ## Troubleshooting
 
-**`[luantibot] inactive: luantibot_world is not set`**
-Add `luantibot_world = <world directory name>` to `minetest.conf` and restart.
-
-**`[luantibot] inactive: luantibot_world is "X" but this world is "Y"`**
-The setting names a different world than the one running. Fail-closed working as
-intended.
+**The mod does nothing and logs nothing**
+It is not loaded in this world. Check that `worldmods/luantibot` exists in the
+world directory and points somewhere real.
 
 **`[luantibot] no HTTP API`**
 `secure.http_mods = luantibot` is missing. `/lb_emerge` still works; polling does
