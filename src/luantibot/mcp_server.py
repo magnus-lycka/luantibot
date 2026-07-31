@@ -268,6 +268,73 @@ def fill_box(
 
 
 @mcp.tool()
+def fill_box_if(
+    world: str,
+    x1: int,
+    y1: int,
+    z1: int,
+    x2: int,
+    y2: int,
+    z2: int,
+    node: str,
+    match: list[str],
+    invert: bool = False,
+    param2: int = 0,
+) -> dict[str, Any]:
+    """Set only the nodes in a box that match a predicate. THIS CHANGES THE WORLD.
+
+    The conditional form of `fill_box`, and the one to reach for whenever the
+    terrain's shape matters but its height is unknown.
+
+    `match` lists node names, or groups written as "group:liquid" and
+    "group:falling_node". A group covers every node the game registers into it,
+    which is the only practical way to say "wherever there is water".
+
+    `invert` writes where the predicate does NOT hold. The two directions cover
+    most terrain work:
+
+      match=["air", "group:liquid"]              a pillar dropped from above
+                                                 fills the gap and stops at
+                                                 rock, without anyone measuring
+                                                 the ground
+
+      match=["air"], invert=True                 carve a shaft up through
+                                                 whatever is solid
+
+    It cannot finish a run with something else -- a footing at the bottom, a
+    grating at the top. That needs to know where the run ended, which this op
+    does not track. Read the terrain and send explicit boxes for the ends.
+
+    Returns a job id immediately; check it with job_status. The reported node
+    count is how many cells actually changed, so 0 means the predicate never
+    matched.
+    """
+    lo, hi = geometry.align((x1, y1, z1), (x2, y2, z2))
+    box_lo = (min(x1, x2), min(y1, y2), min(z1, z2))
+    box_hi = (max(x1, x2), max(y1, y2), max(z1, z2))
+
+    return _submit(
+        world,
+        lo,
+        hi,
+        [
+            {"op": "emerge"},
+            {
+                "op": "fill_box_if",
+                "min": list(box_lo),
+                "max": list(box_hi),
+                "node": 0,
+                "param2": param2,
+                "match": match,
+                "invert": invert,
+            },
+        ],
+        [node],
+        oversize_hint="Fill a smaller box, or split it into several jobs.",
+    )
+
+
+@mcp.tool()
 def job_status(job_id: int) -> dict[str, Any]:
     """Check how a submitted job is going.
 

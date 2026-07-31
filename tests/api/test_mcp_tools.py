@@ -200,3 +200,31 @@ class TestFillBox:
         )
         row = client.get(f"/v1/jobs/{result['job_id']}").json()
         assert row["request"]["ops"][1]["param2"] == 2
+
+
+class TestFillBoxIf:
+    def test_submits_a_conditional_fill(self, tools: None, client: TestClient) -> None:
+        result = mcp_server.fill_box_if(
+            "TestWorld", 0, 0, 0, 4, 40, 4, "mcl_core:stone", ["air", "group:liquid"]
+        )
+        row = client.get(f"/v1/jobs/{result['job_id']}").json()
+
+        assert row["request"]["ops"][1] == {
+            "op": "fill_box_if",
+            "min": [0, 0, 0],
+            "max": [4, 40, 4],
+            "node": 0,
+            "param2": 0,
+            "match": ["air", "group:liquid"],
+            "invert": False,
+        }
+        assert row["request"]["palette"] == ["mcl_core:stone"]
+
+    def test_invert_is_carried(self, tools: None, client: TestClient) -> None:
+        result = mcp_server.fill_box_if("TestWorld", 0, 0, 0, 1, 1, 1, "air", ["air"], invert=True)
+        row = client.get(f"/v1/jobs/{result['job_id']}").json()
+        assert row["request"]["ops"][1]["invert"] is True
+
+    def test_refuses_an_empty_match(self, tools: None, client: TestClient) -> None:
+        result = mcp_server.fill_box_if("TestWorld", 0, 0, 0, 1, 1, 1, "air", [])
+        assert "error" in result

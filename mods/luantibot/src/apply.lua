@@ -89,7 +89,75 @@ local ops = {
         end
         return apply.fill_box(buf, area, op.min, op.max, id, op.param2)
     end,
+
+    fill_box_if = function(buf, area, op, pal)
+        local id, message = pal:id(op.node)
+        if id == nil then
+            return nil, "bad_node", message
+        end
+        -- match.prepare attaches this before execution. Missing means the
+        -- caller skipped that step, which would otherwise match nothing at all
+        -- and silently build a hole where a pillar was asked for.
+        if type(op.matchset) ~= "table" then
+            return nil, "bad_match", "match set was never compiled"
+        end
+        return apply.fill_box_if(buf, area, op.min, op.max, id, op.param2, op.matchset, op.invert)
+    end,
 }
+
+--- Set every node in the box that matches the predicate, leaving the rest.
+---
+--- `matchset` is keyed by content id, compiled once per job by match.lua, so
+--- the test per cell is one table lookup. `invert` flips it: `{air, liquid}`
+--- fills the empty space under a bridge, and the same set inverted carves a
+--- shaft up through whatever is solid.
+---
+--- Still node-local. The predicate looks only at the cell being written, never
+--- at its neighbours or at how many cells came before it, which is what keeps
+--- unit decomposition valid -- see "Ordering and work units" and "What
+--- `fill_box_if` deliberately does not do" in docs/implementation_plan.md.
+---
+--- Unlike `fill_box`, the return is the number of cells actually *changed*,
+--- not the size of the box. That is the useful number here: it is how the
+--- caller learns a pillar found rock immediately, or that a predicate matched
+--- nothing at all.
+---
+--- @param buf table { data, param2 }
+--- @param area table VoxelArea or equivalent
+--- @param p1 table {x,y,z}
+--- @param p2 table {x,y,z}
+--- @param content_id number
+--- @param param2 number|nil
+--- @param matchset table set of content ids, `{ [id] = true }`
+--- @param invert boolean|nil write where the predicate does *not* hold
+--- @return number nodes changed
+function apply.fill_box_if(buf, area, p1, p2, content_id, param2, matchset, invert)
+    local lo, hi = clip(area, p1, p2)
+    if not lo then
+        return 0
+    end
+
+    local data, p2data = buf.data, buf.param2
+    param2 = param2 or 0
+    invert = invert == true
+    local width = hi.x - lo.x
+    local changed = 0
+    for z = lo.z, hi.z do
+        for y = lo.y, hi.y do
+            local base = area:index(lo.x, y, z)
+            for i = 0, width do
+                local idx = base + i
+                -- XOR: matched and not inverted, or unmatched and inverted.
+                if (matchset[data[idx]] == true) ~= invert then
+                    data[idx] = content_id
+                    p2data[idx] = param2
+                    changed = changed + 1
+                end
+            end
+        end
+    end
+    return changed
+end
 
 --- Does this op list change any node?
 ---

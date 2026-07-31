@@ -144,3 +144,64 @@ def test_param2_outside_a_byte_is_rejected(
         ops=[{"op": "fill_box", "min": [1, 1, 1], "max": [2, 2, 2], "node": 0, "param2": bad}]
     )
     reject(client, doc)
+
+
+# --- fill_box_if (M3) ---------------------------------------------------
+
+
+def if_job(fill_job: FillJob, **op_overrides: Any) -> dict[str, Any]:
+    op: dict[str, Any] = {
+        "op": "fill_box_if",
+        "min": [1, 1, 1],
+        "max": [20, 5, 20],
+        "node": 1,
+        "match": ["air", "group:liquid"],
+    }
+    op.update(op_overrides)
+    return fill_job(ops=[{"op": "emerge"}, op])
+
+
+def test_conditional_fill_is_accepted(submit: Submit, fill_job: FillJob) -> None:
+    assert submit(if_job(fill_job)) > 0
+
+
+def test_match_and_invert_reach_the_mod(
+    client: TestClient, world_id: int, submit: Submit, fill_job: FillJob
+) -> None:
+    submit(if_job(fill_job, invert=True))
+
+    body = client.get(f"/v1/worlds/{world_id}/jobs/next").json()
+    assert body["ops"][1]["match"] == ["air", "group:liquid"]
+    assert body["ops"][1]["invert"] is True
+
+
+def test_invert_defaults_to_false(
+    client: TestClient, world_id: int, submit: Submit, fill_job: FillJob
+) -> None:
+    submit(if_job(fill_job))
+    body = client.get(f"/v1/worlds/{world_id}/jobs/next").json()
+    assert body["ops"][1]["invert"] is False
+
+
+def test_empty_match_is_rejected(client: TestClient, fill_job: FillJob) -> None:
+    reject(client, if_job(fill_job, match=[]))
+
+
+def test_blank_match_entry_is_rejected(client: TestClient, fill_job: FillJob) -> None:
+    assert "must not be blank" in reject(client, if_job(fill_job, match=["air", "  "]))
+
+
+def test_conditional_box_outside_bounds_is_rejected(client: TestClient, fill_job: FillJob) -> None:
+    doc = if_job(fill_job, max=[99, 5, 20])
+    assert "outside the job bounds on x" in reject(client, doc)
+
+
+def test_conditional_node_index_is_checked_against_the_palette(
+    client: TestClient, fill_job: FillJob
+) -> None:
+    assert "outside a palette of 2" in reject(client, if_job(fill_job, node=2))
+
+
+def test_group_names_are_not_validated_here(submit: Submit, fill_job: FillJob) -> None:
+    """Only the mod owns the node registry, so the service must not guess."""
+    assert submit(if_job(fill_job, match=["group:whatever", "some_mod:node"])) > 0

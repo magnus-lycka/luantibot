@@ -92,7 +92,38 @@ class FillBoxOp(Strict):
         return self
 
 
-Op = Annotated[EmergeOp | FillBoxOp, Field(discriminator="op")]
+class FillBoxIfOp(Strict):
+    """Set the nodes in a box that match a predicate, leaving the rest.
+
+    `match` names nodes, or groups as `group:liquid`. Groups are the only
+    practical way to say "wherever there is water" without enumerating every
+    mod's liquids; they are resolved in the mod, once per job.
+
+    `invert` writes where the predicate does *not* hold. The two directions are
+    the same op: `[air, group:liquid]` fills the empty space under a bridge, and
+    inverted it carves a shaft up through whatever is solid.
+    """
+
+    op: Literal["fill_box_if"]
+    min: Vec3
+    max: Vec3
+    node: int = Field(ge=0)
+    param2: int = Field(default=0, ge=0, le=255)
+    match: list[str] = Field(min_length=1)
+    invert: bool = False
+
+    @model_validator(mode="after")
+    def well_formed(self) -> FillBoxIfOp:
+        if any(lo > hi for lo, hi in zip(self.min, self.max, strict=True)):
+            raise ValueError("op min must not exceed max on any axis")
+        # Whether a name is registered is the mod's call -- it owns the node
+        # registry. Empty strings are malformed anywhere.
+        if any(not name.strip() for name in self.match):
+            raise ValueError("match entries must not be blank")
+        return self
+
+
+Op = Annotated[EmergeOp | FillBoxOp | FillBoxIfOp, Field(discriminator="op")]
 
 
 class JobRequest(Strict):
@@ -115,7 +146,7 @@ class JobRequest(Strict):
         into a 422 at submission.
         """
         for i, op in enumerate(self.ops):
-            if not isinstance(op, FillBoxOp):
+            if not isinstance(op, FillBoxOp | FillBoxIfOp):
                 continue
 
             if op.node >= len(self.palette):

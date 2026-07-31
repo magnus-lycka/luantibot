@@ -107,6 +107,28 @@ return function(deps)
         return nil
     end
 
+    --- Shared by fill_box and fill_box_if: box inside bounds, palette index and
+    --- param2 well formed.
+    local function check_fill(op, index, lo, hi)
+        local code, message = check_box(op, index, lo, hi)
+        if code then
+            return code, message
+        end
+        -- The palette index only has to be a sane integer here; whether it
+        -- names an entry is settled by palette.lua once the palette is
+        -- resolved, which is the only place that knows the size.
+        if not is_int(op.node) or op.node < 0 then
+            return "bad_op",
+                string.format("op %d: node must be a non-negative palette index", index)
+        end
+        -- Optional: absent means 0. One byte in the engine, so anything
+        -- outside 0-255 is a caller error rather than something to truncate.
+        if op.param2 ~= nil and (not is_int(op.param2) or op.param2 < 0 or op.param2 > 255) then
+            return "bad_op", string.format("op %d: param2 must be 0-255", index)
+        end
+        return nil
+    end
+
     --- What each op type requires beyond its box. Rule 4 is membership of this
     --- table: an op this mod does not implement is refused rather than skipped,
     --- so a job written against a newer service does not half-execute.
@@ -115,22 +137,26 @@ return function(deps)
             return nil
         end,
 
-        fill_box = function(op, index, lo, hi)
-            local code, message = check_box(op, index, lo, hi)
+        fill_box = check_fill,
+
+        fill_box_if = function(op, index, lo, hi)
+            local code, message = check_fill(op, index, lo, hi)
             if code then
                 return code, message
             end
-            -- The palette index only has to be a sane integer here; whether it
-            -- names an entry is settled by palette.lua once the palette is
-            -- resolved, which is the only place that knows the size.
-            if not is_int(op.node) or op.node < 0 then
-                return "bad_op",
-                    string.format("op %d: node must be a non-negative palette index", index)
+            -- Names and groups are only resolved once the registry is
+            -- reachable; all this can say is that the list is well formed.
+            if type(op.match) ~= "table" or #op.match == 0 then
+                return "bad_op", string.format("op %d: match must be a non-empty list", index)
             end
-            -- Optional: absent means 0. One byte in the engine, so anything
-            -- outside 0-255 is a caller error rather than something to truncate.
-            if op.param2 ~= nil and (not is_int(op.param2) or op.param2 < 0 or op.param2 > 255) then
-                return "bad_op", string.format("op %d: param2 must be 0-255", index)
+            for j = 1, #op.match do
+                if type(op.match[j]) ~= "string" then
+                    return "bad_op",
+                        string.format("op %d: match entry %d is not a string", index, j - 1)
+                end
+            end
+            if op.invert ~= nil and type(op.invert) ~= "boolean" then
+                return "bad_op", string.format("op %d: invert must be a boolean", index)
             end
             return nil
         end,

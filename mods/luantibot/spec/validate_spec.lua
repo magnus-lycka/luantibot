@@ -293,3 +293,67 @@ describe("validate.job param2", function()
         assert.is_false(validate.job(fill(1.5), ctx))
     end)
 end)
+
+describe("validate.job fill_box_if", function()
+    local ctx = { world_id = 3, max_blocks = 4096 }
+
+    local function op(overrides)
+        local o = {
+            op = "fill_box_if",
+            min = { 1, 1, 1 },
+            max = { 3, 3, 3 },
+            node = 0,
+            match = { "air", "group:liquid" },
+        }
+        for k, v in pairs(overrides or {}) do
+            o[k] = (v ~= NONE) and v or nil
+        end
+        return job({ ops = { o } })
+    end
+
+    it("accepts a well-formed conditional fill", function()
+        assert.is_true(validate.job(op(), ctx))
+    end)
+
+    it("accepts invert", function()
+        assert.is_true(validate.job(op({ invert = true }), ctx))
+        assert.is_true(validate.job(op({ invert = false }), ctx))
+    end)
+
+    it("rejects a missing match list", function()
+        local ok, code = validate.job(op({ match = NONE }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_op", code)
+    end)
+
+    it("rejects an empty match list", function()
+        local ok, code = validate.job(op({ match = {} }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_op", code)
+    end)
+
+    it("rejects a non-string match entry", function()
+        local ok, code = validate.job(op({ match = { "air", 7 } }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_op", code)
+    end)
+
+    it("rejects a non-boolean invert", function()
+        local ok, code = validate.job(op({ invert = "yes" }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_op", code)
+    end)
+
+    -- The box rules apply to it exactly as they do to fill_box.
+    it("rejects a box outside the bounds", function()
+        local ok, code = validate.job(op({ max = { 99, 3, 3 } }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("box_outside_bounds", code)
+    end)
+
+    it("rejects a bad param2", function()
+        local ok, code = validate.job(op({ param2 = 256 }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_op", code)
+    end)
+end)

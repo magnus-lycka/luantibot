@@ -377,3 +377,122 @@ describe("apply.run param2", function()
         assert.are.equal(0, buf.param2[a:index(1, 1, 1)])
     end)
 end)
+
+describe("apply.fill_box_if", function()
+    local a, buf, MATCH
+    before_each(function()
+        a = area(p(0, 0, 0), p(3, 3, 3))
+        buf = blank(a, 0) -- content 0 everywhere, param2 sentinel 99
+        MATCH = { [0] = true } -- content 0 is the "empty" the tests fill
+    end)
+
+    it("writes where the predicate holds", function()
+        assert.are.equal(8, apply.fill_box_if(buf, a, p(0, 0, 0), p(1, 1, 1), 5, 0, MATCH))
+        assert.are.equal(5, buf.data[a:index(0, 0, 0)])
+        assert.are.equal(5, buf.data[a:index(1, 1, 1)])
+    end)
+
+    it("leaves cells the predicate rejects alone", function()
+        buf.data[a:index(1, 1, 1)] = 42
+        assert.are.equal(7, apply.fill_box_if(buf, a, p(0, 0, 0), p(1, 1, 1), 5, 0, MATCH))
+        assert.are.equal(42, buf.data[a:index(1, 1, 1)])
+        assert.are.equal(99, buf.param2[a:index(1, 1, 1)])
+    end)
+
+    -- The plan's done-criterion: a pillar dropped from above stops at the
+    -- ground, with nobody having computed the terrain height.
+    it("stops at solid ground, which is what makes a pillar work", function()
+        for y = 0, 1 do
+            for x = 0, 3 do
+                for z = 0, 3 do
+                    buf.data[a:index(x, y, z)] = 42 -- rock at y0..y1
+                end
+            end
+        end
+        local n = apply.fill_box_if(buf, a, p(1, 0, 1), p(1, 3, 1), 5, 0, MATCH)
+        assert.are.equal(2, n) -- only y2 and y3 were air
+        assert.are.equal(42, buf.data[a:index(1, 0, 1)])
+        assert.are.equal(42, buf.data[a:index(1, 1, 1)])
+        assert.are.equal(5, buf.data[a:index(1, 2, 1)])
+        assert.are.equal(5, buf.data[a:index(1, 3, 1)])
+    end)
+
+    it("inverts the predicate, which is how a shaft carves upward", function()
+        buf.data[a:index(1, 0, 1)] = 42
+        buf.data[a:index(1, 1, 1)] = 42
+        local n = apply.fill_box_if(buf, a, p(1, 0, 1), p(1, 3, 1), 0, 0, MATCH, true)
+        assert.are.equal(2, n) -- the two solid cells became content 0
+        assert.are.equal(0, buf.data[a:index(1, 0, 1)])
+        assert.are.equal(0, buf.data[a:index(1, 3, 1)])
+    end)
+
+    it("counts cells changed, not the size of the box", function()
+        buf.data[a:index(0, 0, 0)] = 42
+        assert.are.equal(63, apply.fill_box_if(buf, a, p(0, 0, 0), p(3, 3, 3), 5, 0, MATCH))
+    end)
+
+    it("returns zero when nothing matches", function()
+        assert.are.equal(0, apply.fill_box_if(buf, a, p(0, 0, 0), p(3, 3, 3), 5, 0, {}))
+        assert.are.same({}, changed(buf, a, 0))
+    end)
+
+    it("writes param2 only on the cells it changes", function()
+        buf.data[a:index(1, 1, 1)] = 42
+        apply.fill_box_if(buf, a, p(0, 0, 0), p(1, 1, 1), 5, 7, MATCH)
+        assert.are.equal(7, buf.param2[a:index(0, 0, 0)])
+        assert.are.equal(99, buf.param2[a:index(1, 1, 1)])
+    end)
+
+    it("clips to the area like fill_box does", function()
+        assert.are.equal(0, apply.fill_box_if(buf, a, p(9, 9, 9), p(12, 12, 12), 5, 0, MATCH))
+    end)
+end)
+
+describe("apply.run with fill_box_if", function()
+    local a, buf, pal
+    before_each(function()
+        a = area(p(0, 0, 0), p(3, 3, 3))
+        buf = blank(a, 0)
+        pal = fake_palette(2)
+    end)
+
+    it("uses the compiled match set", function()
+        local op = {
+            op = "fill_box_if",
+            min = p(0, 0, 0),
+            max = p(1, 1, 1),
+            node = 1,
+            matchset = { [0] = true },
+        }
+        assert.are.equal(8, apply.run(buf, a, { op }, pal))
+        assert.are.equal(101, buf.data[a:index(0, 0, 0)])
+    end)
+
+    it("honours invert through run", function()
+        buf.data[a:index(0, 0, 0)] = 42
+        local op = {
+            op = "fill_box_if",
+            min = p(0, 0, 0),
+            max = p(1, 1, 1),
+            node = 1,
+            matchset = { [0] = true },
+            invert = true,
+        }
+        assert.are.equal(1, apply.run(buf, a, { op }, pal))
+        assert.are.equal(101, buf.data[a:index(0, 0, 0)])
+    end)
+
+    -- A missing set would match nothing and quietly build a hole where a
+    -- pillar was asked for, so it fails loudly instead.
+    it("fails when the match set was never compiled", function()
+        local op = { op = "fill_box_if", min = p(0, 0, 0), max = p(1, 1, 1), node = 1 }
+        local n, code = apply.run(buf, a, { op }, pal)
+        assert.is_nil(n)
+        assert.are.equal("bad_match", code)
+    end)
+
+    it("counts as a writing op", function()
+        assert.is_true(apply.writes({ { op = "fill_box_if" } }))
+        assert.is_false(apply.writes({ { op = "emerge" } }))
+    end)
+end)

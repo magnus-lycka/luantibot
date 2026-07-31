@@ -21,12 +21,28 @@ local world = load("world")({ emerge = emerge, apply = apply })
 -- `core.get_content_id` raises on a name the game never registered, so the
 -- registry is consulted first: palette.lua wants nil for "no such node", not an
 -- error that would take the whole globalstep down with it.
-local palette = load("palette")({
-    resolve = function(name)
-        if core.registered_nodes[name] == nil then
-            return nil
+local function resolve_node(name)
+    if core.registered_nodes[name] == nil then
+        return nil
+    end
+    return core.get_content_id(name)
+end
+
+local palette = load("palette")({ resolve = resolve_node })
+
+local matcher = load("match")({
+    resolve = resolve_node,
+    -- Walks the registry, so it is called once per job by match.prepare rather
+    -- than per op or per mapblock. Which nodes carry a group is fixed at load
+    -- time, so a job could not observe it changing mid-flight anyway.
+    ids_in_group = function(group)
+        local ids = {}
+        for name, def in pairs(core.registered_nodes) do
+            if def.groups and (def.groups[group] or 0) ~= 0 then
+                ids[#ids + 1] = core.get_content_id(name)
+            end
         end
-        return core.get_content_id(name)
+        return ids
     end,
 })
 
@@ -217,7 +233,15 @@ local function run_job(job)
     end
 
     if writes then
-        world.build(p1, p2, validate.ops_as_positions(job), pal, finished)
+        -- Positions first, then predicates: both turn the wire document into
+        -- the form the executor wants, and both work on copies so the job
+        -- document keeps the shape it arrived in.
+        local prepared, mcode, mmessage = matcher.prepare(validate.ops_as_positions(job))
+        if not prepared then
+            fail_job(job, mcode, mmessage)
+            return
+        end
+        world.build(p1, p2, prepared, pal, finished)
     else
         world.emerge(p1, p2, finished)
     end
