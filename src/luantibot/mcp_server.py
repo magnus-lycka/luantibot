@@ -220,6 +220,7 @@ def fill_box(
     y2: int,
     z2: int,
     node: str,
+    param2: int = 0,
 ) -> dict[str, Any]:
     """Set every node in a box to one node type. THIS CHANGES THE WORLD.
 
@@ -231,6 +232,11 @@ def fill_box(
     `node` is a registered node name for the game in that world, such as
     "mcl_core:stone" or "air" under Mineclonia. An unregistered name fails the
     job without writing anything. Filling with "air" is how you carve.
+
+    `param2` is the node's second byte: facing for a trapdoor or stair, which
+    half a slab occupies, the shade of a dyed block. It defaults to 0, and a
+    fill always sets it -- a replaced node never keeps the orientation of the
+    one it displaced. Nodes that ignore param2, such as stone, ignore it here.
 
     Nodes are written raw: no lighting update, no liquid flow, and node
     callbacks do not run, so filling a box with a liquid gives you a static
@@ -248,7 +254,13 @@ def fill_box(
         hi,
         [
             {"op": "emerge"},
-            {"op": "fill_box", "min": list(box_lo), "max": list(box_hi), "node": 0},
+            {
+                "op": "fill_box",
+                "min": list(box_lo),
+                "max": list(box_hi),
+                "node": 0,
+                "param2": param2,
+            },
         ],
         [node],
         oversize_hint="Fill a smaller box, or split it into several jobs.",

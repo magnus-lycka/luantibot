@@ -258,3 +258,38 @@ describe("validate.job op boxes", function()
         assert.are.equal("bad_op", code)
     end)
 end)
+
+describe("validate.job param2", function()
+    local ctx = { world_id = 3, max_blocks = 4096 }
+
+    local function fill(p2)
+        local op = { op = "fill_box", min = { 1, 1, 1 }, max = { 3, 3, 3 }, node = 0 }
+        op.param2 = p2
+        return job({ ops = { op } })
+    end
+
+    it("accepts an omitted param2", function()
+        assert.is_true(validate.job(fill(nil), ctx))
+    end)
+
+    it("accepts the full byte range", function()
+        assert.is_true(validate.job(fill(0), ctx))
+        assert.is_true(validate.job(fill(255), ctx))
+    end)
+
+    -- One byte in the engine: out of range is a caller error, not something
+    -- to silently truncate into a different orientation.
+    it("rejects a value past a byte", function()
+        local ok, code = validate.job(fill(256), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_op", code)
+    end)
+
+    it("rejects a negative value", function()
+        assert.is_false(validate.job(fill(-1), ctx))
+    end)
+
+    it("rejects a fractional value", function()
+        assert.is_false(validate.job(fill(1.5), ctx))
+    end)
+end)

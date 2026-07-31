@@ -77,6 +77,13 @@ class FillBoxOp(Strict):
     min: Vec3
     max: Vec3
     node: int = Field(ge=0)
+    param2: int = Field(default=0, ge=0, le=255)
+    """Orientation, slab half, dye colour -- whatever the node uses it for.
+
+    One byte in the engine. Defaulted rather than optional because a fill
+    replaces the node completely: leaving it unset would let the new node
+    inherit the facing of whatever it overwrote.
+    """
 
     @model_validator(mode="after")
     def well_formed(self) -> FillBoxOp:

@@ -42,6 +42,9 @@ def test_palette_and_ops_reach_the_mod(
         "min": [1, 1, 1],
         "max": [20, 5, 20],
         "node": 1,
+        # Defaulted in, not omitted: a fill always sets param2, so the mod is
+        # told what to write rather than left to infer it.
+        "param2": 0,
     }
 
 
@@ -56,7 +59,7 @@ def test_op_order_is_preserved_verbatim(
     submit(fill_job(ops=ops))
 
     body = client.get(f"/v1/worlds/{world_id}/jobs/next").json()
-    assert body["ops"] == ops
+    assert body["ops"] == [dict(op, param2=0) for op in ops]
 
 
 def test_node_index_past_the_palette_is_rejected(client: TestClient, fill_job: FillJob) -> None:
@@ -116,5 +119,28 @@ def test_extra_field_on_an_op_is_rejected(client: TestClient, fill_job: FillJob)
     """Strict models everywhere: a typo'd key must not be silently dropped."""
     doc = fill_job(
         ops=[{"op": "fill_box", "min": [1, 1, 1], "max": [2, 2, 2], "node": 0, "nodes": 1}]
+    )
+    reject(client, doc)
+
+
+def test_param2_is_carried_through(
+    client: TestClient, world_id: int, submit: Submit, fill_job: FillJob
+) -> None:
+    """Orientation has to survive the wire, or oriented nodes cannot be placed."""
+    doc = fill_job(
+        ops=[{"op": "fill_box", "min": [1, 1, 1], "max": [2, 2, 2], "node": 0, "param2": 12}]
+    )
+    submit(doc)
+
+    body = client.get(f"/v1/worlds/{world_id}/jobs/next").json()
+    assert body["ops"][0]["param2"] == 12
+
+
+@pytest.mark.parametrize("bad", [256, -1, 1.5])
+def test_param2_outside_a_byte_is_rejected(
+    client: TestClient, fill_job: FillJob, bad: object
+) -> None:
+    doc = fill_job(
+        ops=[{"op": "fill_box", "min": [1, 1, 1], "max": [2, 2, 2], "node": 0, "param2": bad}]
     )
     reject(client, doc)

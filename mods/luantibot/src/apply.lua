@@ -1,9 +1,14 @@
 -- PURE MODULE. Must not reference core, VoxelManip, or any engine global.
 --
--- The ops that write nodes, applied to the flat content-id array a VoxelManip
--- hands out. Nothing here knows what a VoxelManip is: `data` is a plain array
--- and `area` is anything answering `:index(x, y, z)` with a 1-based offset into
--- it, which is exactly what Luanti's VoxelArea does and what the specs fake.
+-- The ops that write nodes, applied to the flat arrays a VoxelManip hands out.
+-- Nothing here knows what a VoxelManip is: `buf` is a pair of plain arrays and
+-- `area` is anything answering `:index(x, y, z)` with a 1-based offset into
+-- them, which is exactly what Luanti's VoxelArea does and what the specs fake.
+--
+-- A node is content id plus `param2`, and `param2` is not decoration: it is the
+-- facing of a trapdoor, the half of a slab, the colour of a dyed block. Writing
+-- content alone leaves the new node wearing whatever orientation the old one
+-- had, so every write sets both. Ops that do not care pass 0.
 --
 -- Two invariants hold for every op in this file, and the unit decomposition in
 -- "Ordering and work units" depends on both:
@@ -43,18 +48,21 @@ apply.clip = clip
 --- mapgen mod uses; `apply_spec.lua` pins it by faking the real index formula
 --- rather than a permissive stub, so a wrong assumption fails there.
 ---
---- @param data table flat array of content ids, 1-based
+--- @param buf table { data = <content ids>, param2 = <param2 bytes> }, 1-based
 --- @param area table anything with MinEdge, MaxEdge and :index(x, y, z)
 --- @param p1 table {x,y,z} one corner
 --- @param p2 table {x,y,z} the opposite corner
 --- @param content_id number
+--- @param param2 number|nil orientation and friends; 0 when not given
 --- @return number nodes written
-function apply.fill_box(data, area, p1, p2, content_id)
+function apply.fill_box(buf, area, p1, p2, content_id, param2)
     local lo, hi = clip(area, p1, p2)
     if not lo then
         return 0
     end
 
+    local data, p2data = buf.data, buf.param2
+    param2 = param2 or 0
     local width = hi.x - lo.x
     local written = 0
     for z = lo.z, hi.z do
@@ -62,6 +70,7 @@ function apply.fill_box(data, area, p1, p2, content_id)
             local base = area:index(lo.x, y, z)
             for i = 0, width do
                 data[base + i] = content_id
+                p2data[base + i] = param2
             end
             written = written + width + 1
         end
@@ -73,12 +82,12 @@ end
 --- satisfied before the VoxelManip is ever read, so by the time this table is
 --- consulted there is nothing left for it to do.
 local ops = {
-    fill_box = function(data, area, op, pal)
+    fill_box = function(buf, area, op, pal)
         local id, message = pal:id(op.node)
         if id == nil then
             return nil, "bad_node", message
         end
-        return apply.fill_box(data, area, op.min, op.max, id)
+        return apply.fill_box(buf, area, op.min, op.max, id, op.param2)
     end,
 }
 
@@ -106,17 +115,17 @@ end
 --- the three things that break unit decomposition. See "Ordering and work
 --- units" in docs/implementation_plan.md.
 ---
---- @param data table flat array of content ids
+--- @param buf table { data = <content ids>, param2 = <param2 bytes> }
 --- @param area table VoxelArea or equivalent
 --- @param job_ops table array of op tables, already validated
 --- @param pal table compiled palette, answering :id(wire_index)
 --- @return number|nil written, string|nil code, string|nil message
-function apply.run(data, area, job_ops, pal)
+function apply.run(buf, area, job_ops, pal)
     local written = 0
     for i, op in ipairs(job_ops) do
         local handler = ops[op.op]
         if handler then
-            local n, code, message = handler(data, area, op, pal)
+            local n, code, message = handler(buf, area, op, pal)
             if n == nil then
                 return nil, code, string.format("op %d: %s", i, message)
             end

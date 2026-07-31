@@ -54,9 +54,12 @@ return function(deps)
             local vm = core.get_voxel_manip()
             local emin, emax = vm:read_from_map(p1, p2)
             local area = VoxelArea:new({ MinEdge = emin, MaxEdge = emax })
-            local data = vm:get_data()
+            -- Both arrays, because a node is content plus param2 and writing
+            -- one without the other leaves the new node wearing the old one's
+            -- orientation.
+            local buf = { data = vm:get_data(), param2 = vm:get_param2_data() }
 
-            local written, code, message = deps.apply.run(data, area, job_ops, pal)
+            local written, code, message = deps.apply.run(buf, area, job_ops, pal)
             if written == nil then
                 return on_done({
                     ok = false,
@@ -66,7 +69,8 @@ return function(deps)
                 })
             end
 
-            vm:set_data(data)
+            vm:set_data(buf.data)
+            vm:set_param2_data(buf.param2)
             -- `false` is the lighting flag. M2 writes raw nodes and nothing
             -- else: no lighting pass, no liquid update. Both arrive later, and
             -- calling them here would make the result depend on node callbacks

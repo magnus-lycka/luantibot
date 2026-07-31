@@ -27,25 +27,28 @@ local function area(min, max)
     }
 end
 
---- An array of `fill` covering the whole area, so a stray write is visible.
+--- A buffer of `fill` covering the whole area, so a stray write is visible.
+--- param2 starts at a sentinel of its own, so "was param2 written" and "was
+--- content written" are separate questions in the assertions below.
 local function blank(a, fill)
     local n = (a.MaxEdge.x - a.MinEdge.x + 1)
         * (a.MaxEdge.y - a.MinEdge.y + 1)
         * (a.MaxEdge.z - a.MinEdge.z + 1)
-    local data = {}
+    local data, param2 = {}, {}
     for i = 1, n do
         data[i] = fill
+        param2[i] = 99
     end
-    return data
+    return { data = data, param2 = param2 }
 end
 
 --- Every position in the area whose value is not `fill`, as "x,y,z" strings.
-local function changed(data, a, fill)
+local function changed(buf, a, fill)
     local out = {}
     for z = a.MinEdge.z, a.MaxEdge.z do
         for y = a.MinEdge.y, a.MaxEdge.y do
             for x = a.MinEdge.x, a.MaxEdge.x do
-                if data[a:index(x, y, z)] ~= fill then
+                if buf.data[a:index(x, y, z)] ~= fill then
                     out[#out + 1] = string.format("%d,%d,%d", x, y, z)
                 end
             end
@@ -65,7 +68,7 @@ describe("apply.fill_box", function()
     it("writes a single-node box", function()
         assert.are.equal(1, apply.fill_box(data, a, p(1, 2, 3), p(1, 2, 3), 7))
         assert.are.same({ "1,2,3" }, changed(data, a, 0))
-        assert.are.equal(7, data[a:index(1, 2, 3)])
+        assert.are.equal(7, data.data[a:index(1, 2, 3)])
     end)
 
     it("writes every node of a larger box and nothing else", function()
@@ -89,8 +92,8 @@ describe("apply.fill_box", function()
 
     it("accepts corners in any order", function()
         assert.are.equal(8, apply.fill_box(data, a, p(1, 1, 1), p(0, 0, 0), 5))
-        assert.are.equal(5, data[a:index(0, 0, 0)])
-        assert.are.equal(5, data[a:index(1, 1, 1)])
+        assert.are.equal(5, data.data[a:index(0, 0, 0)])
+        assert.are.equal(5, data.data[a:index(1, 1, 1)])
     end)
 
     -- The two cases the plan calls out as where index bugs live.
@@ -128,24 +131,24 @@ describe("apply.fill_box", function()
         local d = blank(b, 0)
         assert.are.equal(1, apply.fill_box(d, b, p(-16, -16, -16), p(-16, -16, -16), 3))
         assert.are.same({ "-16,-16,-16" }, changed(d, b, 0))
-        assert.are.equal(3, d[1])
+        assert.are.equal(3, d.data[1])
     end)
 
     it("stays inside the array when filling the far corner", function()
         local b = area(p(-2, -2, -2), p(1, 1, 1))
         local d = blank(b, 0)
         apply.fill_box(d, b, p(1, 1, 1), p(1, 1, 1), 6)
-        assert.are.equal(6, d[64])
-        assert.are.equal(nil, d[65])
+        assert.are.equal(6, d.data[64])
+        assert.are.equal(nil, d.data[65])
     end)
 
     it("applies later ops over earlier ones at the same cell", function()
         apply.fill_box(data, a, p(0, 0, 0), p(3, 3, 3), 1)
         apply.fill_box(data, a, p(1, 1, 1), p(2, 2, 2), 2)
-        assert.are.equal(1, data[a:index(0, 0, 0)])
-        assert.are.equal(2, data[a:index(1, 1, 1)])
-        assert.are.equal(2, data[a:index(2, 2, 2)])
-        assert.are.equal(1, data[a:index(3, 3, 3)])
+        assert.are.equal(1, data.data[a:index(0, 0, 0)])
+        assert.are.equal(2, data.data[a:index(1, 1, 1)])
+        assert.are.equal(2, data.data[a:index(2, 2, 2)])
+        assert.are.equal(1, data.data[a:index(3, 3, 3)])
     end)
 end)
 
@@ -179,7 +182,7 @@ describe("apply.run", function()
     it("applies a single fill_box through the palette", function()
         local ops = { { op = "fill_box", min = p(1, 1, 1), max = p(1, 1, 1), node = 1 } }
         assert.are.equal(1, apply.run(data, a, ops, pal))
-        assert.are.equal(101, data[a:index(1, 1, 1)])
+        assert.are.equal(101, data.data[a:index(1, 1, 1)])
     end)
 
     -- Original order is the contract. Shell before carve depends on it.
@@ -189,9 +192,9 @@ describe("apply.run", function()
             { op = "fill_box", min = p(1, 1, 1), max = p(2, 2, 2), node = 0 },
         }
         assert.are.equal(64 + 8, apply.run(data, a, ops, pal))
-        assert.are.equal(101, data[a:index(0, 0, 0)])
-        assert.are.equal(100, data[a:index(1, 1, 1)])
-        assert.are.equal(101, data[a:index(3, 3, 3)])
+        assert.are.equal(101, data.data[a:index(0, 0, 0)])
+        assert.are.equal(100, data.data[a:index(1, 1, 1)])
+        assert.are.equal(101, data.data[a:index(3, 3, 3)])
     end)
 
     it("reports the total nodes written across ops", function()
@@ -220,7 +223,7 @@ describe("apply.run", function()
         local n, code = apply.run(data, a, ops, pal)
         assert.is_nil(n)
         assert.are.equal("bad_node", code)
-        assert.are.equal(0, data[a:index(2, 2, 2)])
+        assert.are.equal(0, data.data[a:index(2, 2, 2)])
     end)
 
     -- validate.lua refuses these first; this is the drift guard behind it.
@@ -301,5 +304,76 @@ describe("wire ops through validate into apply", function()
             "2,2,1",
             "2,2,2",
         }, changed(data, a, 0))
+    end)
+end)
+
+-- param2 carries orientation, slab half, dye colour. A fill replaces the node
+-- outright, so it must set param2 too: inheriting the facing of whatever was
+-- overwritten is how a trapdoor ends up hinged on the wrong side.
+describe("apply.fill_box param2", function()
+    local a, buf
+    before_each(function()
+        a = area(p(0, 0, 0), p(3, 3, 3))
+        buf = blank(a, 0) -- param2 pre-filled with the sentinel 99
+    end)
+
+    it("writes the given param2 alongside the content id", function()
+        apply.fill_box(buf, a, p(1, 1, 1), p(2, 2, 2), 7, 3)
+        assert.are.equal(7, buf.data[a:index(1, 1, 1)])
+        assert.are.equal(3, buf.param2[a:index(1, 1, 1)])
+        assert.are.equal(3, buf.param2[a:index(2, 2, 2)])
+    end)
+
+    it("defaults to 0 rather than leaving the old value", function()
+        apply.fill_box(buf, a, p(1, 1, 1), p(1, 1, 1), 7)
+        assert.are.equal(0, buf.param2[a:index(1, 1, 1)])
+    end)
+
+    it("leaves param2 outside the box alone", function()
+        apply.fill_box(buf, a, p(1, 1, 1), p(1, 1, 1), 7, 3)
+        assert.are.equal(99, buf.param2[a:index(0, 0, 0)])
+        assert.are.equal(99, buf.param2[a:index(3, 3, 3)])
+    end)
+
+    it("clips param2 writes exactly as it clips content", function()
+        apply.fill_box(buf, a, p(2, 2, 2), p(9, 9, 9), 4, 5)
+        assert.are.equal(5, buf.param2[a:index(3, 3, 3)])
+        assert.are.equal(99, buf.param2[a:index(1, 1, 1)])
+    end)
+
+    it("writes no param2 for a box entirely outside", function()
+        apply.fill_box(buf, a, p(10, 10, 10), p(20, 20, 20), 4, 5)
+        for i = 1, 64 do
+            assert.are.equal(99, buf.param2[i])
+        end
+    end)
+
+    it("lets a later op overwrite an earlier param2", function()
+        apply.fill_box(buf, a, p(0, 0, 0), p(3, 3, 3), 1, 2)
+        apply.fill_box(buf, a, p(1, 1, 1), p(2, 2, 2), 1, 4)
+        assert.are.equal(2, buf.param2[a:index(0, 0, 0)])
+        assert.are.equal(4, buf.param2[a:index(1, 1, 1)])
+    end)
+end)
+
+describe("apply.run param2", function()
+    local a, buf, pal
+    before_each(function()
+        a = area(p(0, 0, 0), p(3, 3, 3))
+        buf = blank(a, 0)
+        pal = fake_palette(2)
+    end)
+
+    it("passes an op's param2 through", function()
+        local op = { op = "fill_box", min = p(1, 1, 1), max = p(1, 1, 1), node = 1, param2 = 12 }
+        apply.run(buf, a, { op }, pal)
+        assert.are.equal(101, buf.data[a:index(1, 1, 1)])
+        assert.are.equal(12, buf.param2[a:index(1, 1, 1)])
+    end)
+
+    it("uses 0 when an op omits it", function()
+        local ops = { { op = "fill_box", min = p(1, 1, 1), max = p(1, 1, 1), node = 1 } }
+        apply.run(buf, a, ops, pal)
+        assert.are.equal(0, buf.param2[a:index(1, 1, 1)])
     end)
 end)

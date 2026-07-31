@@ -127,6 +127,11 @@ return function(deps)
                 return "bad_op",
                     string.format("op %d: node must be a non-negative palette index", index)
             end
+            -- Optional: absent means 0. One byte in the engine, so anything
+            -- outside 0-255 is a caller error rather than something to truncate.
+            if op.param2 ~= nil and (not is_int(op.param2) or op.param2 < 0 or op.param2 > 255) then
+                return "bad_op", string.format("op %d: param2 must be 0-255", index)
+            end
             return nil
         end,
     }

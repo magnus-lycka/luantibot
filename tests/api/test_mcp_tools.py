@@ -164,7 +164,7 @@ class TestFillBox:
         # carries its own emerge.
         assert row["request"]["ops"] == [
             {"op": "emerge"},
-            {"op": "fill_box", "min": [0, 0, 0], "max": [19, 4, 19], "node": 0},
+            {"op": "fill_box", "min": [0, 0, 0], "max": [19, 4, 19], "node": 0, "param2": 0},
         ]
         assert row["request"]["palette"] == ["mcl_core:stone"]
 
@@ -193,3 +193,10 @@ class TestFillBox:
     def test_reports_a_missing_service_readably(self, broken: None) -> None:
         result = mcp_server.fill_box("TestWorld", 0, 0, 0, 1, 1, 1, "air")
         assert "not reachable" in result["error"]
+
+    def test_param2_reaches_the_job(self, tools: None, client: TestClient) -> None:
+        result = mcp_server.fill_box(
+            "TestWorld", 0, 0, 0, 1, 1, 1, "mcl_doors:iron_trapdoor", param2=2
+        )
+        row = client.get(f"/v1/jobs/{result['job_id']}").json()
+        assert row["request"]["ops"][1]["param2"] == 2

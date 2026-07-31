@@ -477,6 +477,11 @@ Three things break that equivalence, and only these three:
    outright and needs a different execution model. Do not add one without
    revisiting this section.
 
+   The first real candidate has already come up and been declined: a
+   conditional fill that marches in a direction and places a terminator where it
+   stops. See "What `fill_box_if` deliberately does not do" under M3 for why it
+   is a survey-plus-explicit-boxes problem instead.
+
 Reporting endpoints as in [suggestion_chatgpt.md](suggestion_chatgpt.md#L120):
 `GET /v1/workers/{id}/jobs/next`, `POST /v1/jobs/{id}/{started,progress,completed,failed}`,
 plus `abandoned` from M4 and `undo` / `retry` from M6.
@@ -869,10 +874,43 @@ Conditional replacement against a match set: explicit node names plus the two
 groups that matter, `liquid` and `falling_node`. Resolve groups to a content-id
 set once at job start, so the inner loop is a set lookup.
 
+Plus an `invert` flag on the match. Two shapes of work need opposite predicates
+and they are otherwise the same op:
+
+- **Pillars and bridge supports** — `match: [air, group:liquid]`. Fill the empty
+  space, leave everything solid alone.
+- **Shafts** — the same match, inverted. Carve what is *not* air, which drives a
+  vertical shaft up through ground until the ground runs out.
+
 **Done when** a tunnel shell built with
 `fill_box_if(air|liquid|falling_node → stone)` leaves existing stone untouched,
 and a pillar dropped from y=40 stops at the ground without Python knowing the
 terrain height.
+
+#### What `fill_box_if` deliberately does not do
+
+A run of conditional fill often wants to *finish* with something: a footing
+where the pillar reaches rock, a grating where the shaft breaks the surface.
+That needs a distinction this op cannot make — between the predicate being false
+on the first cell, and being false after some cells were already filled. The
+second is a property of the run, not of the cell, so evaluating it means reading
+back along the direction of travel.
+
+That is a neighbour-reading op, the third of the three things listed under
+"Ordering and work units" that break unit decomposition, and the reason a
+marching variant is not in M3. A ray crossing a mapblock boundary would restart
+in each unit and terminate in the wrong place.
+
+The intended answer is the one M7 already describes: `survey` (M5) reads the
+column, Python computes where the run ends, and the job carries explicit boxes
+including the cap. The mod stays node-local; the arithmetic lives where it can
+see the whole ray. Periodic placement — shafts every N blocks, alternating
+sides — belongs in the same layer for the same reason.
+
+Reconsider a marching op only if that round trip proves too expensive in
+practice, and revise "Ordering and work units" first rather than after. One
+capability is genuinely lost until then: stopping at the *first* cell where the
+predicate flips, as opposed to treating every cell in the box independently.
 
 ### M4 — Work units and progress
 
