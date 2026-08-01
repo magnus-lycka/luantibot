@@ -716,7 +716,7 @@ Two things came out differently than written:
   the M0 harness. `core.safe_file_write` and `core.get_dir_list` work from a
   non-trusted mod, so M6 snapshots stay on the Lua side.
 
-### M1 — Emerge, end to end
+### ✅ M1 — Emerge, end to end — DONE
 
 The whole pipeline with the one operation that cannot damage anything. Nothing
 here writes a node.
@@ -888,9 +888,12 @@ Notes:
 
 **Done when** you say "emerge the area around -5900, 10, -5450" to Claude, the
 mapblocks generate, and the job row in SQLite reads `completed` with a sensible
-duration.
+duration. — *Met, and then some: two full sweeps of Marduk1 at ±15000, 900 jobs
+per layer, 3.5M mapblocks each. That scale is also where the gaps showed --
+`interrupted` rows needing a repair pass, and generation cost tracking mapgen
+chunks rather than mapblocks.*
 
-### M2 — `fill_box`, the first mutation
+### ✅ M2 — `fill_box`, the first mutation — DONE
 
 1. `apply.lua`: `fill_box(data, area, min, max, content_id)` over a flat array.
    *Heavily unit tested* — this is where index arithmetic bugs live. Cover
@@ -905,9 +908,21 @@ duration.
 5. Extend the job format and the service to carry `palette` and `ops`.
 
 **Done when** a single job builds a 20×5×20 stone slab in the scratch world,
-you can see it in-game, and re-running the identical job changes nothing.
+you can see it in-game, and re-running the identical job changes nothing. —
+*Slab built (job 1807, 2000 nodes) and visible. The idempotency re-run was never
+performed: the milestone was carried by the motorway build that followed, which
+exercised `fill_box` far harder. Worth closing properly when M6 lands, since a
+snapshot makes "changed nothing" checkable rather than merely plausible.*
 
-### M3 — `fill_box_if`
+**What building with it taught us**, none of which the plan anticipated:
+`param2` is not optional -- without it every oriented node comes out wearing
+whatever the old node was facing, which is why it arrived mid-milestone. And a
+cross-section read from the world is authoritative about form but silent about
+repetition: replaying one column along a road gave a solid lane marking where a
+dashed one belonged, and copied 43 nodes of terrain that were never part of the
+design.
+
+### ✅ M3 — `fill_box_if` — DONE
 
 Conditional replacement against a match set: explicit node names plus the two
 groups that matter, `liquid` and `falling_node`. Resolve groups to a content-id
@@ -924,7 +939,15 @@ and they are otherwise the same op:
 **Done when** a tunnel shell built with
 `fill_box_if(air|liquid|falling_node → stone)` leaves existing stone untouched,
 and a pillar dropped from y=40 stops at the ground without Python knowing the
-terrain height.
+terrain height. — *Met. Bridge pillars wrote zero blocks where the ground was
+already at deck level and four where there was a gap, with nothing on either
+side measuring the terrain.*
+
+*The limitation below was not theoretical for long.* A stone lens sitting one
+node under a beam is indistinguishable, to a node-local predicate, from the
+bedrock beneath it -- the difference is how far down it is, a property of the
+column. That one was settled by reading the column here and sending explicit
+boxes, which is exactly the survey-plus-boxes path this section describes.
 
 #### What `fill_box_if` deliberately does not do
 
@@ -951,7 +974,7 @@ practice, and revise "Ordering and work units" first rather than after. One
 capability is genuinely lost until then: stopping at the *first* cell where the
 predicate flips, as opposed to treating every cell in the box independently.
 
-### M4 — Work units and progress
+### ✅ M4 — Work units and progress — DONE
 
 1. `plan.lua` (pure): partition `bounds` into disjoint mapblock-aligned units,
    and for a given unit return the ops clipped to it, in original order — the
@@ -976,7 +999,20 @@ configurable per-step budget only if you find yourself wanting to watch it build
 **Done when** a 400-node-long job completes across many server steps, progress
 rows advance in SQLite, and `kill -9` on the server mid-job leaves an
 `interrupted` row naming the right job, with the mod cleanly picking up new work
-on restart rather than trying to continue.
+on restart rather than trying to continue. — *All met. A 400-node job ran as 5
+units in 2.1s with `units_done` advancing 0 → 2 → 4; `kill -9` at 5/20 of a
+1600-node job left the row `running` with a frozen heartbeat, and the mod
+reported it 48 seconds later on restart.*
+
+*The row reads `abandoned`, not `interrupted`, and the distinction is the whole
+point of step 2: the service never had to infer anything from silence. It would
+have said `interrupted` only if the restart had taken longer than `STALE_AFTER`.
+The wording above predates the `abandoned` state.*
+
+**One defect this found.** A completed job read `4/5`, because the completion
+report deliberately outranks queued progress and so overtakes the last unit's.
+`mark_completed` now sets `units_done = units_total`; a finished job that looks
+stranded is worse than no counter at all.
 
 ### M5 — `survey`
 

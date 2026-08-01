@@ -186,6 +186,10 @@ class InMemoryStore:
         job.state = State.COMPLETED
         job.finished_at = _now()
         job.result = result
+        # The completion report deliberately outranks queued progress, so the
+        # last unit's progress is usually overtaken by it. Without this a
+        # finished job reads 4/5 and looks stranded.
+        job.units_done = job.units_total
         return job
 
     def mark_failed(self, job_id: int, code: str, message: str) -> Job:
@@ -414,8 +418,9 @@ class SqliteStore:
     def mark_completed(self, job_id: int, result: dict[str, Any]) -> Job:
         return self._transition(
             job_id,
-            "UPDATE job SET state = ?, finished_at = ?, result_json = ? "
-            "WHERE id = ? AND state = ? RETURNING *",
+            # units_done = units_total: see the note on the in-memory twin.
+            "UPDATE job SET state = ?, finished_at = ?, result_json = ?, "
+            "units_done = units_total WHERE id = ? AND state = ? RETURNING *",
             (State.COMPLETED.value, _iso(_now()), json.dumps(result)),
         )
 

@@ -102,3 +102,19 @@ def test_an_abandoned_job_is_not_handed_out_again(
 
 def test_abandoned_appears_in_the_state_list(client: TestClient) -> None:
     assert "abandoned" in client.get("/v1/health").json()["states"]
+
+
+def test_a_completed_job_reads_as_fully_done(
+    client: TestClient, world_id: int, job_doc: dict[str, Any], submit: Submit
+) -> None:
+    """The completion report outranks queued progress, so the last unit's report
+    is normally overtaken by it. A finished job must still read n/n rather than
+    n-1/n, which looks stranded."""
+    job_id = submit(job_doc)
+    reserve(client, world_id)
+    client.post(f"/v1/jobs/{job_id}/progress", json={"units_done": 4, "units_total": 5})
+
+    client.post(f"/v1/jobs/{job_id}/completed", json={})
+
+    row = client.get(f"/v1/jobs/{job_id}").json()
+    assert (row["units_done"], row["units_total"]) == (5, 5)
