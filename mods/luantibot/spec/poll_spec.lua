@@ -408,6 +408,37 @@ describe("poll edge cases", function()
         assert.are.same({ kind = "stale" }, p:on_response({ ok = true, code = 200 }))
     end)
 
+    -- The invariant `_reset_timing` exists for, and the reason it must keep
+    -- clearing `_inflight`: a reply from before a rebind must never be
+    -- attributed to the world we just became. Asserted here rather than left to
+    -- the implementation, so removing that line fails a test instead of
+    -- silently attaching another world's job.
+    it("drops a reply that was in flight when the world was rebound", function()
+        local p = new({ world_id = 5 })
+        local req = due(p)
+        assert.are.equal("next", req.kind)
+
+        p:rebind("OtherWorld")
+
+        local event = p:on_response({
+            ok = true,
+            code = 200,
+            body = { job_id = 77, world_id = 5 },
+        })
+        assert.are.same({ kind = "stale" }, event)
+        assert.is_nil(p:job())
+    end)
+
+    it("drops a reply that was in flight when the identity was forgotten", function()
+        local p = new({ world_id = 5 })
+        due(p)
+        p:forget()
+
+        assert.are.same({ kind = "stale" }, p:on_response({ ok = true, code = 200, body = {} }))
+        assert.is_nil(p:world_id())
+        assert.are.equal("register", p:state())
+    end)
+
     it("refuses a world lookup that returns no name", function()
         local p = new({ world_id = 5, world_known_as = false })
         local req = due(p)

@@ -41,9 +41,6 @@ function poll.new(cfg)
         _report = nil,
         _report_tries = 0,
         _side = {},
-        -- Bumped on rebind/forget so a response from the previous identity can
-        -- be recognised as stale and dropped.
-        _epoch = 1,
     }, Poll)
     self._state = self._world_id and "idle" or "register"
     return self
@@ -85,7 +82,11 @@ function Poll:rebind(name)
 end
 
 function Poll:_reset_timing()
-    self._epoch = self._epoch + 1
+    -- Dropping the in-flight record is what makes a response from the previous
+    -- identity stale: on_response finds nothing to attribute it to and returns
+    -- `stale` rather than attaching work to the world we just stopped being.
+    -- There used to be an epoch counter alongside this doing the same job, but
+    -- it could never fire -- this line always caught the case first.
     self._inflight = nil
     self._job = nil
     self._report = nil
@@ -156,7 +157,7 @@ function Poll:tick(dtime)
         end
     end
 
-    self._inflight = { kind = req.kind, epoch = self._epoch }
+    self._inflight = { kind = req.kind }
     return req
 end
 
@@ -188,11 +189,9 @@ end
 function Poll:on_response(res)
     local inflight = self._inflight
     if not inflight then
-        return { kind = "stale" }
-    end
-    if inflight.epoch ~= self._epoch then
-        -- Identity changed while this was in flight. Acting on it would attach
-        -- work to the world we just stopped being.
+        -- Either no request was outstanding, or the identity changed while one
+        -- was: `_reset_timing` clears this precisely so a reply that arrives
+        -- afterwards cannot be acted on. See Poll:rebind.
         return { kind = "stale" }
     end
     self._inflight = nil

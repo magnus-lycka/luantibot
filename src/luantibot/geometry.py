@@ -17,7 +17,19 @@ MAX_MAPBLOCKS = 4096
 """Submission-time ceiling, matching the mod's default
 `luantibot_max_emerge_blocks`. The mod remains the final authority and has its
 own configurable cap; this exists so an obviously oversized job is refused
-before it is ever queued."""
+before it is ever queued.
+
+The number was originally what one VoxelManip could hold. Work units (M4) ended
+that: memory is now bounded by the unit, not the job, and the cap could be
+raised by orders of magnitude without any technical difficulty.
+
+It stays at 4096 for a different reason. **There is no cancellation**, so the
+cap is the only bound on a job you regret -- roughly 90 seconds of generation on
+fresh terrain. The sweeps argue the same way from experience: 900 small jobs
+survived two crashes at the cost of redoing one tile each, where a single job of
+the same extent would have lost forty hours, since retry does not arrive until
+snapshots in M6. Raise this when `cancel` exists, or when M6 makes a big job
+cheap to undo."""
 
 MAPGEN_CHUNK = 80
 """Nodes along one edge of a mapgen chunk (5 mapblocks, Luanti's default).

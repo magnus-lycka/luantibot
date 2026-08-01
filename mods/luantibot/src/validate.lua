@@ -23,6 +23,11 @@ return function(deps)
 
     --- Applied when the caller supplies no cap. Never unlimited: a job arriving
     --- over HTTP must not be able to ask for an unbounded region.
+    ---
+    --- Since M4 this bounds *ambition*, not memory -- work units keep a
+    --- VoxelManip small however large the job is. It stays at 4096 because
+    --- nothing can cancel a running job, so this is the only limit on one that
+    --- was a mistake. See `geometry.MAX_MAPBLOCKS` for the longer version.
     validate.DEFAULT_MAX_BLOCKS = 4096
 
     local function is_int(v)
