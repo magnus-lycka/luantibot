@@ -1,0 +1,17 @@
+-- Coverage config. Run via scripts/coverage, not directly.
+--
+-- Only src/ is reported. The specs themselves always run to completion by
+-- construction, so counting their lines inflates the number without saying
+-- anything about the code under test.
+return {
+    include = { "^src/" },
+
+    -- Without this a module with no spec at all is simply absent from the
+    -- report, and the total is computed over the files that happened to run.
+    -- That is the one number you must not be able to trust: it read 98.89%
+    -- while two modules sat at zero, unlisted. Untested files now appear as 0%.
+    includeuntestedfiles = true,
+
+    statsfile = "luacov.stats.out",
+    reportfile = "luacov.report.out",
+}

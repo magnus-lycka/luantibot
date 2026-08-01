@@ -16,7 +16,44 @@ local identity = load("identity")
 local apply = load("apply")
 local validate = load("validate")({ version = version, plan = plan })
 local poll = load("poll")
-local world = load("world")({ emerge = emerge, apply = apply })
+-- Engine capabilities as closures, so world.lua stays pure and testable. The
+-- EMERGE_* constants and the VoxelManip dance are pure translation and belong
+-- here, on the adapter side of the line.
+local function emerge_kind(action)
+    if action == core.EMERGE_ERRORED then
+        return "errored"
+    elseif action == core.EMERGE_CANCELLED then
+        return "cancelled"
+    end
+    return "ok"
+end
+
+local world = load("world")({
+    emerge = emerge,
+    apply = apply,
+    plan = plan,
+    emerge_area = function(p1, p2, on_block)
+        core.emerge_area(p1, p2, function(_, action, calls_remaining)
+            on_block(emerge_kind(action), calls_remaining)
+        end)
+    end,
+    voxelmanip = function(p1, p2)
+        local vm = core.get_voxel_manip()
+        local emin, emax = vm:read_from_map(p1, p2)
+        return {
+            area = VoxelArea:new({ MinEdge = emin, MaxEdge = emax }),
+            data = vm:get_data(),
+            param2 = vm:get_param2_data(),
+            write = function(data, param2)
+                vm:set_data(data)
+                vm:set_param2_data(param2)
+                -- `false` is the lighting flag: raw nodes, no lighting pass, no
+                -- liquid update. M8 does lighting as its own job type.
+                vm:write_to_map(false)
+            end,
+        }
+    end,
+})
 
 -- `core.get_content_id` raises on a name the game never registered, so the
 -- registry is consulted first: palette.lua wants nil for "no such node", not an
@@ -154,6 +191,28 @@ local poller = poll.new({
 luantibot.poller = poller
 luantibot.stats = { jobs_done = 0, jobs_failed = 0 }
 
+-- Step 2 of the recovery protocol. A job id still in storage means the last
+-- run died between writing it and clearing it, so this server was mid-job when
+-- it stopped. Saying so is strictly better than letting the service infer it
+-- from five minutes of silence: it is immediate, and it distinguishes "the
+-- executor came back" from "nobody has".
+--
+-- Reported, then forgotten unconditionally. If the POST is lost the service
+-- still sweeps the row as `interrupted`, whereas keeping the id would make
+-- every future startup re-report a job nobody is working on.
+local orphan = storage.job_id()
+if orphan then
+    core.log(
+        "warning",
+        string.format(
+            "[luantibot] job %d was running when this server stopped; abandoning it",
+            orphan
+        )
+    )
+    poller:report(string.format("/v1/jobs/%d/abandoned", orphan), {})
+    storage.set_job_id(nil)
+end
+
 local function log_identity()
     core.log(
         "action",
@@ -174,6 +233,7 @@ end
 local function fail_job(job, code, message)
     core.log("error", string.format("[luantibot] job %s failed: %s", tostring(job.job_id), message))
     luantibot.stats.jobs_failed = luantibot.stats.jobs_failed + 1
+    storage.set_job_id(nil)
     poller:finish(false, { code = code, message = message })
 end
 
@@ -203,6 +263,11 @@ local function run_job(job)
     -- starting" from "died mid-job".
     poller:report(string.format("/v1/jobs/%d/started", job.job_id), {})
 
+    -- Written before the first node is touched. If this server dies mid-job the
+    -- value survives in mod storage, and the next startup reports `abandoned`
+    -- rather than leaving the row for the service to time out.
+    storage.set_job_id(job.job_id)
+
     -- An emerge-only job never touches a VoxelManip. Reading one back would
     -- mark every mapblock in the region modified and force it to be re-saved,
     -- which is the opposite of what a generate-terrain job is for.
@@ -229,7 +294,23 @@ local function run_job(job)
             )
         )
         luantibot.stats.jobs_done = luantibot.stats.jobs_done + 1
-        poller:finish(true, { blocks = result.blocks, nodes = result.written or 0, ms = ms })
+        storage.set_job_id(nil)
+        poller:finish(true, {
+            blocks = result.blocks,
+            nodes = result.written or 0,
+            units = result.units or 1,
+            ms = ms,
+        })
+    end
+
+    -- Best effort, and never retried: losing one progress ping must not stall
+    -- the job it describes. Its other purpose is renewing the heartbeat, and
+    -- the next unit will renew it again.
+    local function progress(done, total)
+        poller:report(
+            string.format("/v1/jobs/%d/progress", job.job_id),
+            { units_done = done, units_total = total }
+        )
     end
 
     if writes then
@@ -241,7 +322,7 @@ local function run_job(job)
             fail_job(job, mcode, mmessage)
             return
         end
-        world.build(p1, p2, prepared, pal, finished)
+        world.build(p1, p2, prepared, pal, progress, finished)
     else
         world.emerge(p1, p2, finished)
     end

@@ -1,7 +1,11 @@
 #!/bin/sh
 # Run the Lua unit suite. Busted resolves src/?.lua via mods/luantibot/.busted,
 # so it must run from the mod directory.
+#
+# Output goes through scripts/capped: busted formats a failing assertion's whole
+# diff into one string, and an assertion over a large collection can therefore
+# produce gigabytes. Raise the ceiling for a specific run with CAPPED_BYTES.
 set -e
 . "$(dirname "$0")/lua-env.sh"
 cd "$REPO_ROOT/mods/luantibot"
-exec busted "$@"
+exec "$REPO_ROOT/scripts/capped" -- busted "$@"

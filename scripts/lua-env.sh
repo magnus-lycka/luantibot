@@ -12,6 +12,13 @@
 #            --tree=.luarocks install busted
 #   luarocks --lua-version=5.1 --lua-dir="$(brew --prefix luajit)" \
 #            --tree=.luarocks install luacheck
+#   luarocks --lua-version=5.1 --lua-dir="$(brew --prefix luajit)" \
+#            --tree=.luarocks install luacov
+#
+# Every one of those flags is load-bearing. Homebrew's luarocks defaults to Lua
+# 5.5, so a bare `luarocks install X` puts X in /opt/homebrew where nothing in
+# this project can see it -- and the failure is silent until something reports
+# the rock missing while `luarocks list` shows it installed.
 
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
 export REPO_ROOT

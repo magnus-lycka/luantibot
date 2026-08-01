@@ -220,6 +220,12 @@ __marimo__/
 # Lua rocks tree (project-local, see scripts/lua-env.sh)
 .luarocks/
 
+# Lua coverage output. The `.luacov` config beside them is tracked, like
+# `.busted` is: it decides what gets measured, and its `includeuntestedfiles`
+# is the difference between a module with no spec showing 0% and vanishing from
+# the report altogether.
+mods/luantibot/luacov.*.out
+
 # Integration harness scratch world and logs
 tests/integration/run/
 

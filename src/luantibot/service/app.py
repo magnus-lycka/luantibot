@@ -44,6 +44,11 @@ class FailureReport(BaseModel):
     message: str = ""
 
 
+class ProgressReport(BaseModel):
+    units_done: int = Field(ge=0)
+    units_total: int = Field(ge=1)
+
+
 def _world_view(world: World) -> WorldView:
     return WorldView(
         world_id=world.world_id,
@@ -67,6 +72,9 @@ def _row(job: Job, world: World) -> dict[str, Any]:
         "reserved_at": when(job.reserved_at),
         "started_at": when(job.started_at),
         "finished_at": when(job.finished_at),
+        # Exposed because "is this job alive or wedged" is the question you ask
+        # of a long-running row, and the answer is the age of this timestamp.
+        "heartbeat_at": when(job.heartbeat_at),
         "units_done": job.units_done,
         "units_total": job.units_total,
         "result": job.result,
@@ -169,6 +177,18 @@ def create_app(store: Store) -> FastAPI:
     @app.post("/v1/jobs/{job_id}/failed")
     def failed(job_id: int, report: FailureReport) -> Response:
         return transition(store.mark_failed, job_id, report.code, report.message)
+
+    @app.post("/v1/jobs/{job_id}/progress")
+    def progress(job_id: int, report: ProgressReport) -> Response:
+        # Also renews the heartbeat, which is what lets a long job be told
+        # apart from a dead one.
+        return transition(store.mark_progress, job_id, report.units_done, report.units_total)
+
+    @app.post("/v1/jobs/{job_id}/abandoned")
+    def abandoned(job_id: int) -> Response:
+        # The mod restarted holding this job id. Reported rather than inferred,
+        # so history distinguishes "the executor came back" from "nobody did".
+        return transition(store.mark_abandoned, job_id)
 
     @app.get("/v1/health")
     def health() -> dict[str, str]:

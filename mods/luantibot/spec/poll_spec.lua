@@ -382,3 +382,61 @@ describe("poll world name", function()
         assert.are.equal("next", p:tick(0).kind)
     end)
 end)
+
+-- Branches nothing else reaches. Each is a path the mod takes only when
+-- something has already gone sideways, which is exactly when it must behave.
+describe("poll edge cases", function()
+    it("exposes the world id and the service's name for it", function()
+        local p = new({ world_id = 5 })
+        assert.are.equal(5, p:world_id())
+        assert.are.equal("TestWorld", p:known_as())
+    end)
+
+    it("has no job until one is fetched", function()
+        local p = new({ world_id = 5 })
+        assert.is_nil(p:job())
+
+        due(p)
+        p:on_response({ ok = true, code = 200, body = { job_id = 1, world_id = 5 } })
+        assert.are.same({ job_id = 1, world_id = 5 }, p:job())
+    end)
+
+    -- A reply arriving with nothing in flight is not an error to act on: acting
+    -- would attach work to a request that no longer exists.
+    it("ignores a response when nothing is in flight", function()
+        local p = new({ world_id = 5 })
+        assert.are.same({ kind = "stale" }, p:on_response({ ok = true, code = 200 }))
+    end)
+
+    it("refuses a world lookup that returns no name", function()
+        local p = new({ world_id = 5, world_known_as = false })
+        local req = due(p)
+        assert.are.equal("world", req.kind)
+
+        local event = p:on_response({ ok = true, code = 200, body = { name = 42 } })
+        assert.are.equal("error", event.kind)
+        assert.matches("no name", event.message)
+    end)
+
+    it("backs off after a world lookup with no name rather than hammering", function()
+        local p = new({ world_id = 5, world_known_as = false, interval = 2 })
+        due(p)
+        p:on_response({ ok = true, code = 200, body = {} })
+        assert.is_true(p:wait() > 2)
+    end)
+
+    -- finish() is the executor saying it is done. Called when no job is being
+    -- held it must refuse, or a stray report would be sent for nothing.
+    it("refuses to finish when no job is running", function()
+        local p = new({ world_id = 5 })
+        assert.is_false(p:finish(true, {}))
+    end)
+
+    it("refuses to finish twice", function()
+        local p = new({ world_id = 5 })
+        due(p)
+        p:on_response({ ok = true, code = 200, body = { job_id = 1, world_id = 5 } })
+        assert.is_true(p:finish(true, {}))
+        assert.is_false(p:finish(true, {}))
+    end)
+end)

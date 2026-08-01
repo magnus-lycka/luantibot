@@ -641,6 +641,45 @@ is an ordinary authoring action and a plausible source of order-dependent
 compiler bugs. It says nothing about whether a half-built structure is coherent;
 it isn't.
 
+## Build collisions
+
+A job whose ops land on nodes an earlier job built is usually a mistake — a
+pillar dropped through a bridge deck, a road driven through a tunnel someone
+spent an evening on. Usually, but not always: turning old houses into ruins is a
+legitimate build, and so is widening something that already exists.
+
+So the rule is **warn, do not refuse**, with intent as an explicit field rather
+than a heuristic:
+
+```json
+{"intent": "fresh"}     // default: warn when ops touch a previous build
+{"intent": "replace"}   // deliberate; build over it without complaint
+```
+
+**Compare op boxes, not `bounds`.** Bounds are what gets emerged and are far
+larger than what gets written; two bridges at different heights have overlapping
+bounds and not one node in common. The op boxes are already stored in each job's
+`request`, so this needs no new data — only an index over them.
+
+**This is not the unit seam, and conflating the two would be a bad mistake.**
+The seam is where the mod chopped one job into work units, at whatever multiple
+of 80 nodes the arithmetic produced. Nobody chose it, nobody can see it, and a
+result that depends on where it fell is a defect in the mod — see "Ordering and
+work units". A build collision is the opposite in every respect: it is in the
+design, the author can see it, and the right response is to say so rather than
+to resolve it silently. One is an invariant we owe the user; the other is a
+question we owe them.
+
+Two limits worth stating up front. It can only see what *this service* built, so
+hand-placed nodes and mapgen structures are invisible to it — a village is not
+protected. And the history grows without bound, so comparing a new job against
+every previous one in a world stops being free somewhere in the thousands; that
+is an indexing problem, not a reason to skip the check.
+
+Belongs with the geometry compiler in M7, which is the first point at which
+jobs are generated rather than hand-written and so the first at which a
+collision is likely to be accidental.
+
 ## Milestones
 
 Each has a **Done when** you can actually check. Don't start the next one until
@@ -1083,6 +1122,11 @@ Now the Python side earns its keep: `road`, `corridor`, `chamber`, `shaft`,
 `stairs` → ordered box lists, using survey data to decide tunnel spans and pillar
 depths. Property-based tests as described above. MCP tools at this level are what
 you'll actually talk to.
+
+Also where the collision warning lands — see "Build collisions". This is the
+first milestone where jobs are generated rather than hand-written, and so the
+first where overwriting an earlier build is likely to be an accident rather than
+a decision.
 
 **Done when** "build a road from A to B" produces a road that tunnels through
 hills and bridges valleys without you specifying either.

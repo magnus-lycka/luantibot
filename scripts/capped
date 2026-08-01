@@ -1,0 +1,57 @@
+#!/bin/bash
+# Run a command with its combined output hard-capped, preserving its exit status.
+#
+#   scripts/capped [--bytes N] -- command [args...]
+#
+# Python test runners truncate their own assertion diffs; busted and luacheck do
+# not. A failing assertion over a large collection therefore formats the entire
+# difference into one string, which then has to be buffered by whatever is
+# reading -- and on this machine that was enough to take the editor to 20 GB and
+# force a restart. See "Testing strategy" in docs/implementation_plan.md.
+#
+# The cap is not cosmetic. `head -c` closes the pipe once the limit is reached,
+# the producer takes SIGPIPE and dies, so a runaway is stopped rather than
+# merely hidden. Truncating the display while the process kept generating
+# gigabytes would fix nothing.
+#
+# bash rather than the `#!/bin/sh` the other scripts use, and deliberately: they
+# are one-line exec wrappers, this needs the exit status of the *first* stage of
+# a pipeline. POSIX sh has no way to read it, which costs a temporary file, a
+# trap and an errexit dance; `PIPESTATUS` is one word. macOS ships bash 3.2,
+# which is old but has had PIPESTATUS since long before that.
+
+set -euo pipefail
+
+BYTES=${CAPPED_BYTES:-262144}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --bytes) BYTES=$2; shift 2 ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+
+if [ $# -eq 0 ]; then
+    echo "usage: capped [--bytes N] -- command [args...]" >&2
+    exit 2
+fi
+
+# pipefail would make the pipeline report the cap's own SIGPIPE, so it is off
+# for this line only; PIPESTATUS carries what we actually want.
+set +o pipefail
+"$@" 2>&1 | head -c "$BYTES"
+status=${PIPESTATUS[0]}
+set -o pipefail
+
+# 141 is 128+SIGPIPE: head closed the pipe and the producer died writing to it.
+# The output above is a fragment, so say so rather than let a truncated run be
+# read as a pass.
+if [ "$status" -eq 141 ]; then
+    printf '\n[capped] output reached the %s byte cap; the command was stopped.\n' "$BYTES" >&2
+    printf '[capped] most likely a test is building an unbounded failure message --\n' >&2
+    printf '[capped] assert on a count and a few examples, not on a whole collection.\n' >&2
+    exit 1
+fi
+
+exit "$status"

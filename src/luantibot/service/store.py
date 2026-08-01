@@ -40,6 +40,7 @@ class State(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     INTERRUPTED = "interrupted"
+    ABANDONED = "abandoned"
 
 
 def _now() -> datetime:
@@ -99,6 +100,10 @@ class Store(Protocol):
     def mark_completed(self, job_id: int, result: dict[str, Any]) -> Job: ...
 
     def mark_failed(self, job_id: int, code: str, message: str) -> Job: ...
+
+    def mark_progress(self, job_id: int, units_done: int, units_total: int) -> Job: ...
+
+    def mark_abandoned(self, job_id: int) -> Job: ...
 
     def sweep_stale(self, now: datetime | None = None) -> int: ...
 
@@ -189,6 +194,19 @@ class InMemoryStore:
         job.finished_at = _now()
         job.error_code = code
         job.error_message = message
+        return job
+
+    def mark_progress(self, job_id: int, units_done: int, units_total: int) -> Job:
+        job = self._running(job_id)
+        job.units_done = units_done
+        job.units_total = units_total
+        job.heartbeat_at = _now()
+        return job
+
+    def mark_abandoned(self, job_id: int) -> Job:
+        job = self._running(job_id)
+        job.state = State.ABANDONED
+        job.finished_at = _now()
         return job
 
     def sweep_stale(self, now: datetime | None = None) -> int:
@@ -407,6 +425,35 @@ class SqliteStore:
             "UPDATE job SET state = ?, finished_at = ?, error_code = ?, error_message = ? "
             "WHERE id = ? AND state = ? RETURNING *",
             (State.FAILED.value, _iso(_now()), code, message),
+        )
+
+    def mark_progress(self, job_id: int, units_done: int, units_total: int) -> Job:
+        """Advance the unit counters, and renew the heartbeat while doing it.
+
+        The renewal is the point. Before units existed a job was one burst of
+        work, so a long job and a dead one looked identical to `sweep_stale`
+        after five minutes. A job that reports units cannot be mistaken for a
+        corpse.
+        """
+        return self._transition(
+            job_id,
+            "UPDATE job SET units_done = ?, units_total = ?, heartbeat_at = ? "
+            "WHERE id = ? AND state = ? RETURNING *",
+            (units_done, units_total, _iso(_now())),
+        )
+
+    def mark_abandoned(self, job_id: int) -> Job:
+        """The mod restarted and found this job in its storage.
+
+        Distinct from `interrupted`, which the service infers from silence.
+        `abandoned` is a confession: the executor came back and said it is not
+        working on this. Terminal either way until retry arrives with snapshots
+        in M6, but the two answer different questions when reading history.
+        """
+        return self._transition(
+            job_id,
+            "UPDATE job SET state = ?, finished_at = ? WHERE id = ? AND state = ? RETURNING *",
+            (State.ABANDONED.value, _iso(_now())),
         )
 
     def sweep_stale(self, now: datetime | None = None) -> int:

@@ -482,6 +482,22 @@ describe("apply.run with fill_box_if", function()
         assert.are.equal(101, buf.data[a:index(0, 0, 0)])
     end)
 
+    -- The same guard fill_box has. Covered separately because the two ops
+    -- resolve the palette independently, and only fill_box's branch was tested.
+    it("fails on a palette index with no entry behind it", function()
+        local op = {
+            op = "fill_box_if",
+            min = p(0, 0, 0),
+            max = p(1, 1, 1),
+            node = 9,
+            matchset = { [0] = true },
+        }
+        local n, code, message = apply.run(buf, a, { op }, pal)
+        assert.is_nil(n)
+        assert.are.equal("bad_node", code)
+        assert.matches("op 1", message)
+    end)
+
     -- A missing set would match nothing and quietly build a hole where a
     -- pillar was asked for, so it fails loudly instead.
     it("fails when the match set was never compiled", function()

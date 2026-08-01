@@ -1,0 +1,21 @@
+#!/bin/sh
+# Lua line coverage over src/. Separate from scripts/busted on purpose.
+#
+# luacov hooks every executed line, so an instrumented run costs far more than a
+# plain one -- enough that a suite doing heavy loops looks like it has hung. Keep
+# the specs cheap and this stays usable; see "Testing strategy" in
+# docs/implementation_plan.md.
+#
+# Config lives in mods/luantibot/.luacov. Artefacts are written there and are
+# gitignored.
+set -e
+. "$(dirname "$0")/lua-env.sh"
+cd "$REPO_ROOT/mods/luantibot"
+
+rm -f luacov.stats.out luacov.report.out
+"$REPO_ROOT/scripts/capped" -- busted --coverage "$@" >/dev/null
+luacov
+
+# The per-file summary, without the line-by-line body that makes up most of the
+# report file.
+sed -n '/^====*$/,$p' luacov.report.out | tail -n +2
