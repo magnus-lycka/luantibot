@@ -228,3 +228,32 @@ class TestFillBoxIf:
     def test_refuses_an_empty_match(self, tools: None, client: TestClient) -> None:
         result = mcp_server.fill_box_if("TestWorld", 0, 0, 0, 1, 1, 1, "air", [])
         assert "error" in result
+
+
+class TestServiceDown:
+    """Every tool degrades to the same readable error, not a traceback.
+
+    This is the first thing an agent sees when the service is not running, and
+    it is the message that has to say what to start.
+    """
+
+    def test_job_status_says_what_to_start(self, broken: None) -> None:
+        result = mcp_server.job_status(1)
+        assert "not reachable" in result["error"]
+        assert "luantibot.service" in result["hint"]
+
+    def test_build_history_says_what_to_start(self, broken: None) -> None:
+        result = mcp_server.build_history("TestWorld")
+        assert "not reachable" in result["error"]
+
+    def test_list_worlds_says_what_to_start(self, broken: None) -> None:
+        assert "not reachable" in mcp_server.list_worlds()["error"]
+
+
+def test_emerge_slab_refuses_a_bad_side_without_submitting(tools: None, client: TestClient) -> None:
+    """geometry.slab raises rather than returning; the tool has to turn that into
+    an error an agent can read, not a traceback."""
+    result = mcp_server.emerge_slab("TestWorld", 0, 0, 0, 0, 15)
+
+    assert "side must be positive" in result["error"]
+    assert client.get("/v1/worlds").json() == []

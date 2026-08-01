@@ -13,20 +13,32 @@ import pytest
 from fastapi.testclient import TestClient
 
 from luantibot.service.app import create_app
-from luantibot.service.store import SqliteStore
+from luantibot.service.store import InMemoryStore, SqliteStore, Store
 
 WORLD_NAME = "TestWorld"
 
 
-@pytest.fixture
-def store(tmp_path: Path) -> Iterator[SqliteStore]:
-    s = SqliteStore(tmp_path / "luantibot.sqlite")
-    yield s
-    s.close()
+@pytest.fixture(params=["sqlite", "memory"])
+def store(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Store]:
+    """Every API test runs against both implementations of the Store protocol.
+
+    The claim in the module docstring above -- that swapping the store changed
+    only this file, and that this proves the API contract does not leak the
+    storage schema -- was true when written and then quietly stopped being
+    checked. Only SQLite was exercised, so the in-memory implementation could
+    drift without anything failing, and during M4 it did: two new transitions
+    were written into both stores and run in one.
+    """
+    if request.param == "sqlite":
+        sqlite = SqliteStore(tmp_path / "luantibot.sqlite")
+        yield sqlite
+        sqlite.close()
+    else:
+        yield InMemoryStore()
 
 
 @pytest.fixture
-def client(store: SqliteStore) -> Iterator[TestClient]:
+def client(store: Store) -> Iterator[TestClient]:
     with TestClient(create_app(store)) as c:
         yield c
 

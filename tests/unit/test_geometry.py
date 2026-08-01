@@ -70,3 +70,61 @@ class TestCube:
         under = geometry.mapblock_count(*geometry.cube((0, 0, 0), 112))
         over = geometry.mapblock_count(*geometry.cube((0, 0, 0), 128))
         assert under <= geometry.MAX_MAPBLOCKS < over
+
+
+class TestSlab:
+    """The shape `cube` is not: X/Z and Y sized independently.
+
+    Ties directly to a measurement. Sweeping a layer with `cube` would have
+    bought 240 nodes of height for a 16-node request, and the cost of the extra
+    is not the ratio of volumes -- it is the ratio of mapgen chunks, which is
+    what made the difference between a four-hour sweep and a forty-hour one.
+    """
+
+    def test_sizes_the_square_and_the_height_independently(self) -> None:
+        lo, hi = geometry.slab((0, 0), 1024, 0, 15)
+        assert (hi[0] - lo[0] + 1, hi[2] - lo[2] + 1) == (1024, 1024)
+        assert (lo[1], hi[1]) == (0, 15)
+
+    def test_centres_the_square_on_the_given_point(self) -> None:
+        lo, hi = geometry.slab((100, -200), 32, 0, 15)
+        assert lo[0] <= 100 <= hi[0]
+        assert lo[2] <= -200 <= hi[2]
+
+    def test_expands_to_whole_mapblocks(self) -> None:
+        lo, hi = geometry.slab((0, 0), 10, 3, 4)
+        assert lo[1] == 0 and hi[1] == 15
+
+    def test_accepts_an_inverted_height(self) -> None:
+        assert geometry.slab((0, 0), 32, 15, 0) == geometry.slab((0, 0), 32, 0, 15)
+
+    def test_a_one_mapblock_slab_of_1024_square_is_exactly_the_cap(self) -> None:
+        # The largest slab a single job may ask for, and the size the sweeps used.
+        lo, hi = geometry.slab((0, 0), 1024, 0, 15)
+        assert geometry.mapblock_count(lo, hi) == geometry.MAX_MAPBLOCKS
+
+    @pytest.mark.parametrize("side", [0, -1])
+    def test_refuses_a_non_positive_side(self, side: int) -> None:
+        with pytest.raises(ValueError, match="side must be positive"):
+            geometry.slab((0, 0), side, 0, 15)
+
+
+class TestMapgenChunks:
+    """Cost tracks chunks, not mapblocks -- see the docstring on the function."""
+
+    def test_counts_a_single_chunk(self) -> None:
+        assert geometry.mapgen_chunks((0, 0, 0), (79, 79, 79)) == 1
+
+    def test_counts_partially_covered_chunks(self) -> None:
+        # Generation cannot do less than a whole chunk, so one node over the
+        # boundary is a second chunk.
+        assert geometry.mapgen_chunks((0, 0, 0), (80, 0, 0)) == 2
+
+    def test_floors_toward_negative_infinity(self) -> None:
+        assert geometry.mapgen_chunks((-1, 0, 0), (0, 0, 0)) == 2
+
+    def test_height_below_one_chunk_is_not_cheaper(self) -> None:
+        """The whole reason a thin slab costs what it does."""
+        thin = geometry.mapgen_chunks((0, 0, 0), (1023, 15, 1023))
+        thick = geometry.mapgen_chunks((0, 0, 0), (1023, 79, 1023))
+        assert thin == thick

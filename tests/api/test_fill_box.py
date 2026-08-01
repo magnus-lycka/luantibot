@@ -205,3 +205,9 @@ def test_conditional_node_index_is_checked_against_the_palette(
 def test_group_names_are_not_validated_here(submit: Submit, fill_job: FillJob) -> None:
     """Only the mod owns the node registry, so the service must not guess."""
     assert submit(if_job(fill_job, match=["group:whatever", "some_mod:node"])) > 0
+
+
+def test_inverted_conditional_box_is_rejected(client: TestClient, fill_job: FillJob) -> None:
+    """The same guard fill_box has. Separate models, so separate validators."""
+    doc = if_job(fill_job, min=[20, 5, 20], max=[1, 1, 1])
+    assert "min must not exceed max" in reject(client, doc)
