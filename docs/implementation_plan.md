@@ -102,7 +102,7 @@ luantibot/
     │   ├── world.lua       # pure: the unit walk; engine injected
     │   ├── client.lua      # adapter: HTTP
     │   ├── storage.lua     # adapter: mod storage
-    │   └── snapshot.lua    # adapter: region serialisation (M6)
+    │   └── snapshot.lua    # pure: region ↔ self-describing bytes (M6)
     └── spec/               # busted tests, one per pure module
 ```
 
@@ -240,8 +240,11 @@ tested with busted and fakes that are a dozen lines each.
 **Adapters** may touch the engine, and in exchange are allowed no logic — no
 branching on job content, no arithmetic beyond argument shuffling. `world.lua`
 wraps `core.emerge_area`, `core.get_voxel_manip`, `core.get_content_id`.
-`client.lua` wraps HTTP, `storage.lua` wraps mod storage, `snapshot.lua` will
-wrap file I/O. `init.lua` is the wiring that acquires engine handles at load
+`client.lua` wraps HTTP and `storage.lua` wraps mod storage. `snapshot.lua` was
+expected to join them and did not: encoding a region is arithmetic over two
+arrays, so it is pure and the file I/O is injected like every other engine
+capability. Being able to encode under one node registry and decode under
+another — which is the whole point of the format — is only testable that way. `init.lua` is the wiring that acquires engine handles at load
 time — including `core.request_http_api()`, which *must* run at top level — and
 injects them into the pure modules. Adapters get integration coverage only.
 
@@ -1136,6 +1139,12 @@ On write, scan the unit for its distinct content ids, emit the name table, and
 store local indices. On restore, resolve each name through `core.get_content_id`
 against the *current* registry and build a remap array, then translate the body.
 
+Luanti embeds LuaJIT, which is Lua 5.1 and has **no `string.pack`** — that
+arrived in 5.3. The packing is therefore by hand and big-endian, and bytes are
+emitted in bounded chunks joined once at the end: `string.char` and `unpack`
+both take a limited number of arguments, and appending a byte at a time to a
+string would be quadratic over half a million nodes.
+
 Two things fall out of this. It is also the compression fix: a unit of natural
 terrain holds a few dozen distinct nodes, so local indices fit in one byte where
 raw ids need two — record the index width in the header and pick it at write
@@ -1146,6 +1155,18 @@ half-correct restore is worse than a refused one, because you would not notice.
 `param2` needs no remapping — it is per-node raw data. It is only meaningful
 against the node definition it was written for, which the name check already
 guards.
+
+#### Built so far
+
+`src/snapshot.lua` and its spec: the format above, encode and decode, with the
+header readable on its own so `undo` can check every name is still registered
+before it starts changing the world. Measured at 0.01s to encode a full 5×5×5
+unit — 512,000 nodes, 1 MB at two bytes each.
+
+Six of its tests encode under one registry and decode under a different one,
+which is the case a format storing raw ids would get wrong silently. Still to
+build: the per-unit rule and commit protocol below, the `undo` and `retry`
+endpoints, and the element-wise oracle.
 
 #### The snapshot rule
 
