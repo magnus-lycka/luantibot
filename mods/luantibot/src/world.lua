@@ -38,8 +38,9 @@ return function(deps)
         end)
     end
 
-    --- Emerge one unit, apply the ops clipped to it, write it back.
-    local function build_unit(unit, job_ops, pal, done)
+    --- Emerge one unit, apply the ops clipped to it, write it back if any of
+    --- them changed something.
+    local function build_unit(unit, job_ops, pal, env, done)
         -- Clipped here and nowhere else. apply.lua bounds writes to the
         -- VoxelManip region, which reaches past the unit; this is what keeps
         -- them inside it.
@@ -50,12 +51,15 @@ return function(deps)
                 return done(result)
             end
 
-            -- Nothing writes here. Reading a VoxelManip back would mark every
-            -- mapblock in the unit modified for no reason, which matters for a
-            -- job whose bounds are large but whose ops touch only part of it.
-            if not deps.apply.writes(unit_ops) then
+            -- Three cases, not two. Nothing to look at: skip the VoxelManip
+            -- entirely, which matters for a job whose bounds are large but
+            -- whose ops touch only part of it. Reads but does not write: a
+            -- survey, which must not be written back or it would mark every
+            -- mapblock in the unit modified for nothing.
+            if not deps.apply.reads(unit_ops) then
                 return done({ ok = true, blocks = result.blocks, written = 0 })
             end
+            local writes = deps.apply.writes(unit_ops)
 
             local vm = deps.voxelmanip(unit.min, unit.max)
             -- Both arrays: a node is content plus param2, and writing one
@@ -63,12 +67,14 @@ return function(deps)
             -- orientation.
             local buf = { data = vm.data, param2 = vm.param2 }
 
-            local written, code, message = deps.apply.run(buf, vm.area, unit_ops, pal)
+            local written, code, message = deps.apply.run(buf, vm.area, unit_ops, pal, env)
             if written == nil then
                 return done({ ok = false, code = code, error = message })
             end
 
-            vm.write(buf.data, buf.param2)
+            if writes then
+                vm.write(buf.data, buf.param2)
+            end
             done({ ok = true, blocks = result.blocks, written = written })
         end)
     end
@@ -96,6 +102,9 @@ return function(deps)
         local units = deps.plan.units(p1, p2)
         local total = #units
         local index, blocks, written = 0, 0, 0
+        -- Carried across units so a survey spanning several of them accumulates
+        -- into one answer rather than one per unit.
+        local env = { survey = deps.survey, out = nil }
 
         local function next_unit()
             index = index + 1
@@ -105,10 +114,11 @@ return function(deps)
                     blocks = blocks,
                     written = written,
                     units = total,
+                    columns = env.out and deps.survey.finish(env.out) or nil,
                 })
             end
 
-            build_unit(units[index], job_ops, pal, function(result)
+            build_unit(units[index], job_ops, pal, env, function(result)
                 if not result.ok then
                     result.units = total
                     result.units_done = index - 1

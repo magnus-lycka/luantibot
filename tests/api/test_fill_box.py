@@ -211,3 +211,56 @@ def test_inverted_conditional_box_is_rejected(client: TestClient, fill_job: Fill
     """The same guard fill_box has. Separate models, so separate validators."""
     doc = if_job(fill_job, min=[20, 5, 20], max=[1, 1, 1])
     assert "min must not exceed max" in reject(client, doc)
+
+
+# --- survey (M5) --------------------------------------------------------
+
+
+def survey_job(fill_job: FillJob, **op_overrides: Any) -> dict[str, Any]:
+    op: dict[str, Any] = {"op": "survey", "min": [0, 0, 0], "max": [31, 31, 31]}
+    op.update(op_overrides)
+    return fill_job(ops=[{"op": "emerge"}, op])
+
+
+def test_survey_job_is_accepted(submit: Submit, fill_job: FillJob) -> None:
+    assert submit(survey_job(fill_job)) > 0
+
+
+def test_survey_needs_no_palette(submit: Submit, fill_job: FillJob) -> None:
+    """Read-only, so an empty palette must not be a reason to refuse it."""
+    assert submit(survey_job(fill_job, **{})) > 0
+    doc = survey_job(fill_job)
+    doc["palette"] = []
+    assert submit(doc) > 0
+
+
+def test_step_defaults_to_every_column(
+    client: TestClient, world_id: int, submit: Submit, fill_job: FillJob
+) -> None:
+    submit(survey_job(fill_job))
+    body = client.get(f"/v1/worlds/{world_id}/jobs/next").json()
+    assert body["ops"][1]["step"] == 1
+
+
+def test_step_reaches_the_mod(
+    client: TestClient, world_id: int, submit: Submit, fill_job: FillJob
+) -> None:
+    submit(survey_job(fill_job, step=8))
+    body = client.get(f"/v1/worlds/{world_id}/jobs/next").json()
+    assert body["ops"][1]["step"] == 8
+
+
+@pytest.mark.parametrize("bad", [0, -1])
+def test_a_step_below_one_is_rejected(client: TestClient, fill_job: FillJob, bad: int) -> None:
+    """Zero would divide by zero in the sampler; negative would never terminate."""
+    reject(client, survey_job(fill_job, step=bad))
+
+
+def test_a_survey_box_outside_the_bounds_is_rejected(client: TestClient, fill_job: FillJob) -> None:
+    """Otherwise it would report on a region that was never emerged."""
+    doc = survey_job(fill_job, max=[99, 31, 31])
+    assert "outside the job bounds on x" in reject(client, doc)
+
+
+def test_an_inverted_survey_box_is_rejected(client: TestClient, fill_job: FillJob) -> None:
+    reject(client, survey_job(fill_job, min=[31, 0, 0], max=[0, 31, 31]))

@@ -160,6 +160,12 @@ function plan.clip_ops(ops, lo, hi)
                 for k, v in pairs(op) do
                     copy[k] = v
                 end
+                -- Where the op's box began before any clipping. An op that
+                -- samples must anchor its grid to that: anchoring to the
+                -- clipped corner would shift the grid from unit to unit, and
+                -- anchoring to absolute zero means a box that happens to
+                -- contain no multiple of the step samples nothing at all.
+                copy.anchor = op.anchor or op.min
                 copy.min, copy.max = a, b
                 out[#out + 1] = copy
             end

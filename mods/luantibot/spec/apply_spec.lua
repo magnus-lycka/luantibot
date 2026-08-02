@@ -512,3 +512,53 @@ describe("apply.run with fill_box_if", function()
         assert.is_false(apply.writes({ { op = "emerge" } }))
     end)
 end)
+
+describe("apply survey op", function()
+    local a, buf, pal
+    before_each(function()
+        a = area(p(0, 0, 0), p(3, 3, 3))
+        buf = blank(a, 0)
+        pal = fake_palette(2)
+    end)
+
+    local function env()
+        return {
+            survey = require("survey")({
+                walkable = function(id)
+                    return id ~= 0
+                end,
+                name = function(id)
+                    return "id" .. tostring(id)
+                end,
+            }),
+        }
+    end
+
+    it("counts as a read but not as a write", function()
+        local ops = { { op = "survey", min = p(0, 0, 0), max = p(3, 3, 3) } }
+        assert.is_true(apply.reads(ops))
+        assert.is_false(apply.writes(ops))
+    end)
+
+    it("gathers columns into the environment without touching the buffer", function()
+        buf.data[a:index(1, 2, 1)] = 5 -- something for the survey to find
+        local before = changed(buf, a, 0)
+
+        local ops = { { op = "survey", min = p(0, 0, 0), max = p(3, 3, 3), step = 1 } }
+        local e = env()
+
+        assert.are.equal(0, apply.run(buf, a, ops, pal, e))
+        assert.are.same(before, changed(buf, a, 0), "a survey must leave the buffer alone")
+        assert.are.equal(2, e.out["1,1"].y)
+    end)
+
+    -- Same shape as the missing matchset guard: reaching here means the caller
+    -- skipped a preparation step, and answering with an empty survey would look
+    -- like flat terrain rather than a mistake.
+    it("fails when no environment was supplied", function()
+        local ops = { { op = "survey", min = p(0, 0, 0), max = p(1, 1, 1) } }
+        local n, code = apply.run(buf, a, ops, pal)
+        assert.is_nil(n)
+        assert.are.equal("bad_op", code)
+    end)
+end)

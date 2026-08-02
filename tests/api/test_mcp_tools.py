@@ -257,3 +257,34 @@ def test_emerge_slab_refuses_a_bad_side_without_submitting(tools: None, client: 
 
     assert "side must be positive" in result["error"]
     assert client.get("/v1/worlds").json() == []
+
+
+class TestSurvey:
+    def test_submits_an_emerge_and_a_survey(self, tools: None, client: TestClient) -> None:
+        result = mcp_server.survey("TestWorld", 0, 0, 63, 63, y_min=0, y_max=63, step=8)
+        row = client.get(f"/v1/jobs/{result['job_id']}").json()
+
+        assert row["request"]["ops"] == [
+            {"op": "emerge"},
+            {"op": "survey", "min": [0, 0, 0], "max": [63, 63, 63], "step": 8},
+        ]
+
+    def test_carries_no_palette(self, tools: None, client: TestClient) -> None:
+        """Read-only: nothing is written, so nothing needs naming."""
+        result = mcp_server.survey("TestWorld", 0, 0, 15, 15)
+        assert client.get(f"/v1/jobs/{result['job_id']}").json()["request"]["palette"] == []
+
+    def test_the_emerged_region_rounds_out_but_the_scan_does_not(self, tools: None) -> None:
+        result = mcp_server.survey("TestWorld", 1, 1, 2, 2, y_min=0, y_max=15)
+        assert result["bounds"] == {"min": [0, 0, 0], "max": [15, 15, 15]}
+
+    def test_accepts_corners_in_any_order(self, tools: None, client: TestClient) -> None:
+        result = mcp_server.survey("TestWorld", 63, 63, 0, 0, y_min=0, y_max=15)
+        op = client.get(f"/v1/jobs/{result['job_id']}").json()["request"]["ops"][1]
+        assert op["min"][0] == 0 and op["max"][0] == 63
+
+    def test_a_tall_box_is_what_makes_a_survey_oversized(self, tools: None) -> None:
+        """Height is the usual culprit, so the hint says so."""
+        result = mcp_server.survey("TestWorld", 0, 0, 2000, 2000, y_min=-500, y_max=500)
+        assert "error" in result
+        assert "y_min..y_max" in result["hint"]

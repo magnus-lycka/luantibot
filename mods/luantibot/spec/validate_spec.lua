@@ -357,3 +357,55 @@ describe("validate.job fill_box_if", function()
         assert.are.equal("bad_op", code)
     end)
 end)
+
+describe("validate.job survey", function()
+    local ctx = { world_id = 3, max_blocks = 4096 }
+
+    local function op(overrides)
+        local o = { op = "survey", min = { 1, 1, 1 }, max = { 3, 3, 3 } }
+        for k, v in pairs(overrides or {}) do
+            o[k] = (v ~= NONE) and v or nil
+        end
+        return job({ ops = { o } })
+    end
+
+    it("accepts a survey with no step, which means every column", function()
+        assert.is_true(validate.job(op(), ctx))
+    end)
+
+    it("accepts a positive step", function()
+        assert.is_true(validate.job(op({ step = 8 }), ctx))
+    end)
+
+    -- Zero divides by zero in the sampler; negative never terminates.
+    it("rejects a step of zero", function()
+        local ok, code = validate.job(op({ step = 0 }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_op", code)
+    end)
+
+    it("rejects a negative step", function()
+        local ok, code = validate.job(op({ step = -1 }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_op", code)
+    end)
+
+    it("rejects a fractional step", function()
+        local ok, code = validate.job(op({ step = 1.5 }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_op", code)
+    end)
+
+    -- It would otherwise report on a region that was never emerged.
+    it("rejects a box outside the bounds", function()
+        local ok, code = validate.job(op({ max = { 99, 3, 3 } }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("box_outside_bounds", code)
+    end)
+
+    it("rejects an inverted box", function()
+        local ok, code = validate.job(op({ min = { 3, 1, 1 }, max = { 1, 3, 3 } }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_box", code)
+    end)
+end)

@@ -1014,14 +1014,38 @@ report deliberately outranks queued progress and so overtakes the last unit's.
 `mark_completed` now sets `units_done = units_total`; a finished job that looks
 stranded is worse than no counter at all.
 
-### M5 — `survey`
+### ✅ M5 — `survey` — DONE
 
 A read-only job returning, per column in a region, the surface height and the
 first solid node — enough for Python to plan tunnels, bridges and pillar depths.
 Downsample on the Lua side; a 4×1000 road strip is a few thousand columns.
 
 **Done when** Python can fetch a profile along a route and print where it would
-need to tunnel.
+need to tunnel. — *Met. A 750-node profile east of the motorway, sampled every
+eighth column, printed 72 columns wanting a bridge and 18 wanting a tunnel, with
+the ground falling to y-9 across a bay and rising to y29 into a ridge.*
+
+**The surface is the first walkable node, not the first node**, and that is the
+whole design rather than a detail. Snow, tall grass, and a trapdoor set into a
+ceiling all occupy a cell without being ground. The proof came free in the first
+real profile: over water the survey reported `seagrass_sand` on the seabed,
+because water is not walkable — the naive reading would have run the deck along
+the surface of the bay.
+
+Two things the shape of the answer forced:
+
+- **Scan top down.** A column over a cave has solid ground both above and below
+  the void, and only the upper one can be built on.
+- **Anchor the sample grid to the caller's box**, carried through
+  `plan.clip_ops` as `anchor`. Anchoring to the clipped corner shifts the grid
+  between work units, duplicating columns on one side of a seam and dropping
+  them on the other; anchoring to absolute zero means a profile along a single
+  line at an odd coordinate samples nothing at all. Both were found by trying to
+  use it.
+
+`world.build` now has three cases rather than two: no VoxelManip, read it, or
+read and write it. A survey must never be written back -- doing so would mark
+every mapblock in the region modified for a job that changed nothing.
 
 ### M6 — Snapshot and undo
 

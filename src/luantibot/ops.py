@@ -123,7 +123,37 @@ class FillBoxIfOp(Strict):
         return self
 
 
-Op = Annotated[EmergeOp | FillBoxOp | FillBoxIfOp, Field(discriminator="op")]
+class SurveyOp(Strict):
+    """Read a region and report, per column, the first surface you could stand on.
+
+    Read-only: no palette entry, no `param2`, and the mod never writes the
+    VoxelManip back. What comes back is in the job's completion result, under
+    `columns`.
+
+    `step` samples every Nth column on both axes -- a 4x1000 road strip is four
+    thousand columns at step 1, and the answer is usually wanted as a profile
+    rather than a census. Sampling is anchored to absolute coordinates, so the
+    grid does not shift with the box.
+
+    A column reports the highest **walkable** node, not the highest node. Snow,
+    plants, and a trapdoor in a ceiling all occupy a cell without being
+    something you could build on, and treating them as the surface would hang a
+    bridge in the air.
+    """
+
+    op: Literal["survey"]
+    min: Vec3
+    max: Vec3
+    step: int = Field(default=1, ge=1)
+
+    @model_validator(mode="after")
+    def well_formed(self) -> SurveyOp:
+        if any(lo > hi for lo, hi in zip(self.min, self.max, strict=True)):
+            raise ValueError("op min must not exceed max on any axis")
+        return self
+
+
+Op = Annotated[EmergeOp | FillBoxOp | FillBoxIfOp | SurveyOp, Field(discriminator="op")]
 
 
 class JobRequest(Strict):
@@ -146,13 +176,16 @@ class JobRequest(Strict):
         into a 422 at submission.
         """
         for i, op in enumerate(self.ops):
-            if not isinstance(op, FillBoxOp | FillBoxIfOp):
-                continue
-
-            if op.node >= len(self.palette):
+            # Only a fill draws from the palette; containment applies to every
+            # op that carries a box, or a survey could ask about a region that
+            # was never emerged and be silently clipped to one that was.
+            if isinstance(op, FillBoxOp | FillBoxIfOp) and op.node >= len(self.palette):
                 raise ValueError(
                     f"op {i}: node index {op.node} is outside a palette of {len(self.palette)}"
                 )
+
+            if isinstance(op, EmergeOp):
+                continue
 
             outside = [
                 axis

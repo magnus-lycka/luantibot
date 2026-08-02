@@ -78,6 +78,22 @@ function apply.fill_box(buf, area, p1, p2, content_id, param2)
     return written
 end
 
+--- Ops that read the world without changing it. Listed apart from `ops` because
+--- the caller needs the distinction: a unit holding only these still needs the
+--- VoxelManip read, but must not be written back.
+local readers = {
+    survey = function(buf, area, op, _, env)
+        if env == nil or env.survey == nil then
+            return nil, "bad_op", "survey needs an environment with a survey module"
+        end
+        env.out = env.survey.merge(
+            env.out or {},
+            env.survey.columns(buf, area, op.min, op.max, op.step, op.anchor)
+        )
+        return 0
+    end,
+}
+
 --- What each op does to the array. `emerge` is absent on purpose: it is
 --- satisfied before the VoxelManip is ever read, so by the time this table is
 --- consulted there is nothing left for it to do.
@@ -159,13 +175,25 @@ function apply.fill_box_if(buf, area, p1, p2, content_id, param2, matchset, inve
     return changed
 end
 
---- Does this op list change any node?
+--- Does this op list need to look at the world at all?
 ---
---- The caller uses this to skip the VoxelManip entirely for an emerge-only job.
---- That is not just an optimisation: reading and writing back a VoxelManip
---- marks every mapblock in it modified, so a job that was asked to generate
---- terrain and nothing else would dirty the whole region and force it to be
---- re-saved.
+--- Distinct from `writes`, and the distinction is the point: a survey needs the
+--- VoxelManip read and must never be written back, while a job that only
+--- generates terrain needs no VoxelManip whatsoever. Reading one back marks
+--- every mapblock in it modified and forces a re-save, which is the opposite of
+--- what an emerge-only job is for.
+--- @return boolean
+function apply.reads(job_ops)
+    for _, op in ipairs(job_ops) do
+        if ops[op.op] or readers[op.op] then
+            return true
+        end
+    end
+    return false
+end
+
+--- Does this op list change any node? Decides whether the buffer is written
+--- back, not whether it is read -- see `apply.reads`.
 --- @return boolean
 function apply.writes(job_ops)
     for _, op in ipairs(job_ops) do
@@ -187,13 +215,17 @@ end
 --- @param area table VoxelArea or equivalent
 --- @param job_ops table array of op tables, already validated
 --- @param pal table compiled palette, answering :id(wire_index)
+--- @param env table|nil capabilities and output for ops that need more than the
+---   buffer -- `survey` reads the node registry and produces columns. Kept out
+---   of the module's construction so that `fill_box`, which is arithmetic over
+---   an array, does not acquire a dependency on the registry.
 --- @return number|nil written, string|nil code, string|nil message
-function apply.run(buf, area, job_ops, pal)
+function apply.run(buf, area, job_ops, pal, env)
     local written = 0
     for i, op in ipairs(job_ops) do
-        local handler = ops[op.op]
+        local handler = ops[op.op] or readers[op.op]
         if handler then
-            local n, code, message = handler(buf, area, op, pal)
+            local n, code, message = handler(buf, area, op, pal, env)
             if n == nil then
                 return nil, code, string.format("op %d: %s", i, message)
             end

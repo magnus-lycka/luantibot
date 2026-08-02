@@ -335,6 +335,62 @@ def fill_box_if(
 
 
 @mcp.tool()
+def survey(
+    world: str,
+    x1: int,
+    z1: int,
+    x2: int,
+    z2: int,
+    y_min: int = -32,
+    y_max: int = 128,
+    step: int = 8,
+) -> dict[str, Any]:
+    """Read the ground: per column, the height and name of the first surface.
+
+    Changes nothing. This is how you find out what the terrain does before
+    building on it -- where a road would have to bridge, how deep a pillar
+    falls, whether a route crosses water.
+
+    The answer arrives in the job's completion result under `columns`, so this
+    returns a job id and you fetch the data with `job_status` once it is done.
+    Each column is `{x, z, y, node}`, with `y` and `node` absent where the whole
+    column was air.
+
+    `y_min`/`y_max` bound the scan and should bracket the terrain you care
+    about; a taller box costs more to emerge and finds nothing extra. `step`
+    samples every Nth column on both axes -- a thousand-node route is a profile,
+    not a census, and step 8 is usually plenty.
+
+    The height reported is of the first **walkable** node, not the first node.
+    Snow, tall grass and a trapdoor set into a ceiling all occupy a cell without
+    being ground, and counting them would put a bridge deck a metre too high.
+    """
+    lo, hi = geometry.align((x1, y_min, z1), (x2, y_max, z2))
+    box_lo = (min(x1, x2), y_min, min(z1, z2))
+    box_hi = (max(x1, x2), y_max, max(z1, z2))
+
+    return _submit(
+        world,
+        lo,
+        hi,
+        [
+            {"op": "emerge"},
+            {
+                "op": "survey",
+                "min": list(box_lo),
+                "max": list(box_hi),
+                "step": step,
+            },
+        ],
+        [],
+        oversize_hint=(
+            "Survey a shorter stretch, or narrow y_min..y_max -- height is "
+            "usually what makes the box too big."
+        ),
+    )
+
+
+@mcp.tool()
 def job_status(job_id: int) -> dict[str, Any]:
     """Check how a submitted job is going.
 

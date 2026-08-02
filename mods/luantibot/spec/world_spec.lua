@@ -34,6 +34,14 @@ local function engine(pad)
         emerge = require("emerge"),
         apply = apply,
         plan = plan,
+        survey = require("survey")({
+            walkable = function(id)
+                return id ~= 0
+            end,
+            name = function(id)
+                return "id" .. tostring(id)
+            end,
+        }),
 
         emerge_area = function(p1, p2, on_block)
             e.emerges[#e.emerges + 1] = { min = p1, max = p2 }
@@ -247,5 +255,68 @@ describe("world.build failure", function()
         assert.is_false(result.ok)
         assert.are.equal("bad_node", result.code)
         assert.are.equal(0, #e.writes)
+    end)
+end)
+
+describe("world.build read-only jobs", function()
+    local lo, hi = p(0, 0, 0), p(159, 15, 15)
+
+    local function survey_op()
+        return { { op = "survey", min = lo, max = hi, step = 16 } }
+    end
+
+    -- The third case: reads the VoxelManip, must never write it back. Writing
+    -- would mark every mapblock in the region modified for a job that changed
+    -- nothing.
+    it("reads the world without writing it", function()
+        local e = engine()
+        local result = build(e, lo, hi, survey_op())
+        assert.is_true(result.ok)
+        assert.are.equal(2, #e.emerges)
+        assert.are.equal(0, #e.writes)
+    end)
+
+    it("still visits every unit", function()
+        local e = engine()
+        build(e, lo, hi, survey_op())
+        assert.are.equal(#plan.units(lo, hi), #e.emerges)
+    end)
+
+    it("returns columns", function()
+        local e = engine()
+        local result = build(e, lo, hi, survey_op())
+        assert.is_table(result.columns)
+        assert.is_true(#result.columns > 0)
+    end)
+
+    -- The reason the accumulator is carried across units rather than rebuilt.
+    it("gathers one answer per column across all units", function()
+        local e = engine()
+        local result = build(e, lo, hi, survey_op())
+        local seen = {}
+        for _, c in ipairs(result.columns) do
+            local key = c.x .. "," .. c.z
+            assert.is_nil(seen[key], "column " .. key .. " reported twice")
+            seen[key] = true
+        end
+    end)
+
+    it("reports no columns for a job that surveys nothing", function()
+        local e = engine()
+        local result = build(e, lo, hi, { { op = "emerge" } })
+        assert.is_nil(result.columns)
+    end)
+
+    -- A job may do both, and then the buffer must be written back.
+    it("writes when a fill accompanies the survey", function()
+        local e = engine()
+        local ops = {
+            { op = "survey", min = lo, max = hi, step = 16 },
+            { op = "fill_box", min = p(0, 0, 0), max = p(9, 9, 9), node = 1 },
+        }
+        local result = build(e, lo, hi, ops)
+        assert.is_true(result.ok)
+        assert.are.equal(1, #e.writes)
+        assert.is_table(result.columns)
     end)
 end)

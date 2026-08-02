@@ -28,10 +28,25 @@ local function emerge_kind(action)
     return "ok"
 end
 
+-- `walkable` is what separates a surface from a node that merely occupies a
+-- cell: a trapdoor, a plant, a slab's empty half. Defaults to true in Luanti,
+-- so the test is against an explicit false. `name` turns ids back into
+-- something the caller can read.
+local survey = load("survey")({
+    walkable = function(id)
+        local def = core.registered_nodes[core.get_name_from_content_id(id)]
+        return def == nil or def.walkable ~= false
+    end,
+    name = function(id)
+        return core.get_name_from_content_id(id)
+    end,
+})
+
 local world = load("world")({
     emerge = emerge,
     apply = apply,
     plan = plan,
+    survey = survey,
     emerge_area = function(p1, p2, on_block)
         core.emerge_area(p1, p2, function(_, action, calls_remaining)
             on_block(emerge_kind(action), calls_remaining)
@@ -268,14 +283,15 @@ local function run_job(job)
     -- rather than leaving the row for the service to time out.
     storage.set_job_id(job.job_id)
 
-    -- An emerge-only job never touches a VoxelManip. Reading one back would
-    -- mark every mapblock in the region modified and force it to be re-saved,
-    -- which is the opposite of what a generate-terrain job is for.
-    local writes = apply.writes(job.ops)
-    core.log(
-        "action",
-        string.format("[luantibot] job %d: %s", job.job_id, writes and "building" or "emerging")
-    )
+    -- Three kinds of job, and only the first can skip the VoxelManip. Choosing
+    -- on `writes` would send a survey down the emerge-only path and it would
+    -- read nothing at all.
+    local reads = apply.reads(job.ops)
+    local kind = "emerging"
+    if reads then
+        kind = apply.writes(job.ops) and "building" or "surveying"
+    end
+    core.log("action", string.format("[luantibot] job %d: %s", job.job_id, kind))
 
     local function finished(result)
         local ms = math.floor((core.get_us_time() - started) / 1000)
@@ -300,6 +316,10 @@ local function run_job(job)
             nodes = result.written or 0,
             units = result.units or 1,
             ms = ms,
+            -- Only present for a survey; the whole point of the job is what it
+            -- read, so it travels back in the completion rather than being
+            -- something the caller has to fetch separately.
+            columns = result.columns,
         })
     end
 
@@ -313,7 +333,7 @@ local function run_job(job)
         )
     end
 
-    if writes then
+    if reads then
         -- Positions first, then predicates: both turn the wire document into
         -- the form the executor wants, and both work on copies so the job
         -- document keeps the shape it arrived in.
