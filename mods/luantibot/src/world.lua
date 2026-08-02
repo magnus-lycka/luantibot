@@ -17,6 +17,7 @@
 ---   emerge = <src/emerge.lua>,
 ---   apply  = <src/apply.lua>,
 ---   plan   = <src/plan.lua>,
+---   snapshot = <src/snapshot.lua instance>,
 ---   emerge_area = function(p1, p2, on_block) -- on_block(kind, calls_remaining)
 ---   voxelmanip  = function(p1, p2) -> {
 ---       area, data, param2, write = function(data, param2) } }
@@ -40,7 +41,7 @@ return function(deps)
 
     --- Emerge one unit, apply the ops clipped to it, write it back if any of
     --- them changed something.
-    local function build_unit(unit, job_ops, pal, env, done)
+    local function build_unit(unit, index, job_ops, pal, env, done)
         -- Clipped here and nowhere else. apply.lua bounds writes to the
         -- VoxelManip region, which reaches past the unit; this is what keeps
         -- them inside it.
@@ -66,6 +67,22 @@ return function(deps)
             -- without the other leaves the new node wearing the old one's
             -- orientation.
             local buf = { data = vm.data, param2 = vm.param2 }
+
+            -- read -> snapshot -> apply -> write. The snapshot goes before
+            -- apply because `buf` *is* the VoxelManip's arrays: once an op has
+            -- run there is no unmodified copy left to record. And it goes
+            -- before the write because a snapshot that is not on disk cannot
+            -- undo anything -- so a failure here abandons the unit rather than
+            -- changing a world it could not put back.
+            if writes and env.snapshot then
+                -- The unit's own region, not the VoxelManip's larger one: see
+                -- snapshot.region_of for why the difference matters.
+                local region = deps.snapshot.region_of(buf, vm.area, unit.min, unit.max)
+                local status, scode, smessage = env.snapshot(index, region)
+                if status == nil then
+                    return done({ ok = false, code = scode, error = smessage })
+                end
+            end
 
             local written, code, message = deps.apply.run(buf, vm.area, unit_ops, pal, env)
             if written == nil then
@@ -98,13 +115,20 @@ return function(deps)
     --- @param pal table compiled palette, answering :id(wire_index)
     --- @param on_progress function(done, total, written)
     --- @param on_done function(result)
-    function world.build(p1, p2, job_ops, pal, on_progress, on_done)
+    --- @param env_extra table|nil merged into the per-job environment. `snapshot`
+    ---   is a function(unit_index, region) called between reading a unit and
+    ---   writing it; returning nil aborts the job rather than changing a world
+    ---   that could not be put back.
+    function world.build(p1, p2, job_ops, pal, on_progress, on_done, env_extra)
         local units = deps.plan.units(p1, p2)
         local total = #units
         local index, blocks, written = 0, 0, 0
         -- Carried across units so a survey spanning several of them accumulates
         -- into one answer rather than one per unit.
         local env = { survey = deps.survey, out = nil }
+        for k, v in pairs(env_extra or {}) do
+            env[k] = v
+        end
 
         local function next_unit()
             index = index + 1
@@ -118,7 +142,7 @@ return function(deps)
                 })
             end
 
-            build_unit(units[index], job_ops, pal, env, function(result)
+            build_unit(units[index], index, job_ops, pal, env, function(result)
                 if not result.ok then
                     result.units = total
                     result.units_done = index - 1

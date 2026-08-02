@@ -293,3 +293,114 @@ describe("snapshot encode refuses bad input", function()
         assert.are.equal(0, out.param2[1])
     end)
 end)
+
+-- Lifting a unit out of a VoxelManip buffer and putting it back. The buffer is
+-- always larger than the unit, which is the point: a snapshot must cover the
+-- unit alone, or it records its neighbour's post-build state and restores that.
+describe("snapshot region", function()
+    local function area(min, max)
+        local ystride = max.x - min.x + 1
+        local zstride = ystride * (max.y - min.y + 1)
+        return {
+            MinEdge = min,
+            MaxEdge = max,
+            index = function(self, x, y, z)
+                return (z - self.MinEdge.z) * zstride
+                    + (y - self.MinEdge.y) * ystride
+                    + (x - self.MinEdge.x)
+                    + 1
+            end,
+        }
+    end
+
+    local function p(x, y, z)
+        return { x = x, y = y, z = z }
+    end
+
+    local reg = registry(NODES)
+    local s = snap(reg)
+
+    --- A buffer over `a` where every cell holds a value derived from its
+    --- position, so a misplaced copy is visible rather than plausible.
+    local function marked(a)
+        local buf = { data = {}, param2 = {} }
+        for z = a.MinEdge.z, a.MaxEdge.z do
+            for y = a.MinEdge.y, a.MaxEdge.y do
+                for x = a.MinEdge.x, a.MaxEdge.x do
+                    local i = a:index(x, y, z)
+                    buf.data[i] = reg.id("mcl_core:stone")
+                    buf.param2[i] = (x * 9 + y * 3 + z) % 256
+                end
+            end
+        end
+        return buf
+    end
+
+    it("takes only the box, not the whole buffer", function()
+        local a = area(p(-4, -4, -4), p(11, 11, 11)) -- 16 cubed
+        local unit_lo, unit_hi = p(0, 0, 0), p(7, 7, 7) -- 8 cubed inside it
+        local taken = s.region_of(marked(a), a, unit_lo, unit_hi)
+        assert.are.equal(512, taken.count)
+    end)
+
+    it("round-trips through the file format", function()
+        local a = area(p(-4, -4, -4), p(11, 11, 11))
+        local unit_lo, unit_hi = p(0, 0, 0), p(7, 7, 7)
+        local buf = marked(a)
+
+        local taken = s.region_of(buf, a, unit_lo, unit_hi)
+        local back = s.decode(s.encode(taken, taken.count))
+
+        local blank = { data = {}, param2 = {} }
+        for i = 1, 16 * 16 * 16 do
+            blank.data[i], blank.param2[i] = reg.id("air"), 0
+        end
+        assert.are.equal(512, s.restore_into(blank, a, unit_lo, unit_hi, back))
+
+        for z = unit_lo.z, unit_hi.z do
+            for y = unit_lo.y, unit_hi.y do
+                for x = unit_lo.x, unit_hi.x do
+                    local i = a:index(x, y, z)
+                    assert.are.equal(buf.param2[i], blank.param2[i], "param2 moved at " .. x)
+                    assert.are.equal(buf.data[i], blank.data[i])
+                end
+            end
+        end
+    end)
+
+    -- The containment property, again: a restore must not reach into cells
+    -- belonging to units this snapshot says nothing about.
+    it("writes nothing outside the box", function()
+        local a = area(p(-4, -4, -4), p(11, 11, 11))
+        local unit_lo, unit_hi = p(0, 0, 0), p(7, 7, 7)
+
+        local taken = s.region_of(marked(a), a, unit_lo, unit_hi)
+        local blank = { data = {}, param2 = {} }
+        for i = 1, 16 * 16 * 16 do
+            blank.data[i], blank.param2[i] = reg.id("air"), 99
+        end
+        s.restore_into(blank, a, unit_lo, unit_hi, taken)
+
+        local outside = 0
+        for z = a.MinEdge.z, a.MaxEdge.z do
+            for y = a.MinEdge.y, a.MaxEdge.y do
+                for x = a.MinEdge.x, a.MaxEdge.x do
+                    local inside = x >= 0 and x <= 7 and y >= 0 and y <= 7 and z >= 0 and z <= 7
+                    if not inside and blank.param2[a:index(x, y, z)] ~= 99 then
+                        outside = outside + 1
+                    end
+                end
+            end
+        end
+        assert.are.equal(0, outside)
+    end)
+
+    it("refuses a snapshot whose size does not match the unit", function()
+        local a = area(p(0, 0, 0), p(7, 7, 7))
+        local taken = s.region_of(marked(a), a, p(0, 0, 0), p(3, 3, 3))
+        local n, code, message = s.restore_into(marked(a), a, p(0, 0, 0), p(7, 7, 7), taken)
+        assert.is_nil(n)
+        assert.are.equal("bad_snapshot", code)
+        assert.matches("64 nodes but the unit is 512", message)
+    end)
+end)

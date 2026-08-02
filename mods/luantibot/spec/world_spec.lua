@@ -34,6 +34,14 @@ local function engine(pad)
         emerge = require("emerge"),
         apply = apply,
         plan = plan,
+        snapshot = require("snapshot")({
+            name = function(id)
+                return "id" .. tostring(id)
+            end,
+            resolve = function(name)
+                return tonumber(name:match("^id(%d+)$"))
+            end,
+        }),
         survey = require("survey")({
             walkable = function(id)
                 return id ~= 0
@@ -95,14 +103,14 @@ local function engine(pad)
     return e
 end
 
-local function build(e, p1, p2, ops)
+local function build(e, p1, p2, ops, env_extra)
     local world = require("world")(e.deps)
     local progress, result = {}, nil
     world.build(p1, p2, ops, pal, function(done, total, written)
         progress[#progress + 1] = { done = done, total = total, written = written }
     end, function(r)
         result = r
-    end)
+    end, env_extra)
     return result, progress
 end
 
@@ -318,5 +326,98 @@ describe("world.build read-only jobs", function()
         assert.is_true(result.ok)
         assert.are.equal(1, #e.writes)
         assert.is_table(result.columns)
+    end)
+end)
+
+describe("world.build commit protocol", function()
+    local lo, hi = p(0, 0, 0), p(159, 15, 15)
+    local function fill()
+        return { { op = "fill_box", min = lo, max = hi, node = 1 } }
+    end
+
+    --- Records the order of snapshot and write calls, so the protocol itself is
+    --- observable rather than inferred.
+    local function recorder(e, fail_at)
+        local log = {}
+        local original = e.deps.voxelmanip
+        e.deps.voxelmanip = function(a, b)
+            local vm = original(a, b)
+            local write = vm.write
+            vm.write = function(...)
+                log[#log + 1] = "write"
+                return write(...)
+            end
+            return vm
+        end
+        return log,
+            function(index, region)
+                log[#log + 1] = "snapshot:" .. index .. ":" .. region.count
+                if fail_at == index then
+                    return nil, "snapshot_failed", "disk full"
+                end
+                return "written"
+            end
+    end
+
+    it("snapshots each unit before writing it", function()
+        local e = engine()
+        local log, snap = recorder(e)
+        build(e, lo, hi, fill(), { snapshot = snap })
+
+        assert.are.same({ "snapshot:1:20480", "write", "snapshot:2:20480", "write" }, log)
+    end)
+
+    -- 80x16x16: the unit, not the padded VoxelManip region the buffer covers.
+    it("snapshots the unit, not the VoxelManip's larger region", function()
+        local e = engine(16)
+        local _, snap = recorder(e)
+        local seen = {}
+        build(e, lo, hi, fill(), {
+            snapshot = function(i, region)
+                seen[#seen + 1] = region.count
+                return snap(i, region)
+            end,
+        })
+        assert.are.same({ 80 * 16 * 16, 80 * 16 * 16 }, seen)
+    end)
+
+    -- A world changed with no way back is the one outcome undo cannot fix.
+    it("does not write a unit whose snapshot failed", function()
+        local e = engine()
+        local log, snap = recorder(e, 1)
+        local result = build(e, lo, hi, fill(), { snapshot = snap })
+
+        assert.is_false(result.ok)
+        assert.are.equal("snapshot_failed", result.code)
+        assert.are.same({ "snapshot:1:20480" }, log)
+        assert.are.equal(0, #e.writes)
+    end)
+
+    it("stops the whole job at the first failed snapshot", function()
+        local e = engine()
+        local _, snap = recorder(e, 2)
+        local result = build(e, lo, hi, fill(), { snapshot = snap })
+        assert.is_false(result.ok)
+        assert.are.equal(1, #e.writes, "only the first unit was written")
+    end)
+
+    -- Nothing changes, so there is nothing to put back.
+    it("does not snapshot a read-only job", function()
+        local e = engine()
+        local calls = 0
+        build(e, lo, hi, { { op = "survey", min = lo, max = hi, step = 16 } }, {
+            snapshot = function()
+                calls = calls + 1
+                return "written"
+            end,
+        })
+        assert.are.equal(0, calls)
+    end)
+
+    it("builds normally when no snapshotter is supplied", function()
+        local e = engine()
+        local result = build(e, lo, hi, fill())
+        assert.is_true(result.ok)
+        assert.are.equal(2, #e.writes)
     end)
 end)

@@ -153,6 +153,65 @@ return function(deps)
         return w:done()
     end
 
+    --- Lift a box out of a VoxelManip buffer into a dense region.
+    ---
+    --- A snapshot covers the *unit*, never the VoxelManip's region, even though
+    --- the buffer holds the latter. The VM rounds outward, so its region
+    --- reaches into the neighbouring unit -- and that rim is read *after* the
+    --- neighbour was written, so it would record post-build state and restore
+    --- it back over the neighbour. Undoing in reverse order happens to
+    --- untangle that, but only by an argument nobody should have to reconstruct.
+    --- Taking the unit alone removes the question.
+    ---
+    --- @param buf table { data, param2 } over `area`
+    --- @param area table VoxelArea or equivalent
+    --- @param lo table {x,y,z} the unit
+    --- @param hi table {x,y,z}
+    --- @return table { data, param2, count } in x-major order within the box
+    function snapshot.region_of(buf, area, lo, hi)
+        local data, param2 = {}, {}
+        local n = 0
+        for z = lo.z, hi.z do
+            for y = lo.y, hi.y do
+                local base = area:index(lo.x, y, z)
+                for i = 0, hi.x - lo.x do
+                    n = n + 1
+                    data[n] = buf.data[base + i]
+                    param2[n] = buf.param2[base + i]
+                end
+            end
+        end
+        return { data = data, param2 = param2, count = n }
+    end
+
+    --- Write a region back into a VoxelManip buffer, at the same box.
+    ---
+    --- Only the box is touched. The buffer reaches further, and those cells
+    --- belong to units this snapshot says nothing about.
+    ---
+    --- @return number|nil written, string|nil code, string|nil message
+    function snapshot.restore_into(buf, area, lo, hi, region)
+        local expected = (hi.x - lo.x + 1) * (hi.y - lo.y + 1) * (hi.z - lo.z + 1)
+        if region.count ~= expected then
+            return nil,
+                "bad_snapshot",
+                string.format("snapshot holds %d nodes but the unit is %d", region.count, expected)
+        end
+
+        local n = 0
+        for z = lo.z, hi.z do
+            for y = lo.y, hi.y do
+                local base = area:index(lo.x, y, z)
+                for i = 0, hi.x - lo.x do
+                    n = n + 1
+                    buf.data[base + i] = region.data[n]
+                    buf.param2[base + i] = region.param2[n]
+                end
+            end
+        end
+        return n
+    end
+
     local function u8(blob, pos)
         return string.byte(blob, pos), pos + 1
     end
