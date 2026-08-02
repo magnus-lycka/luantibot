@@ -215,6 +215,44 @@ def create_app(store: Store) -> FastAPI:
         job = store.create(original.world_id, request)
         return SubmitResponse(job_id=job.job_id, world_id=original.world_id)
 
+    @app.post("/v1/jobs/{job_id}/retry", status_code=201)
+    def retry(job_id: int) -> SubmitResponse:
+        """Enqueue restore-then-re-run for a job that did not finish.
+
+        Not a resumption. An interrupted job left the world in a state nobody
+        described -- some units built, one possibly half-written -- and there is
+        no record of how far it got that can be trusted. Putting the region back
+        first and running the whole thing again is the only recovery that does
+        not depend on knowing where it stopped.
+
+        The re-run snapshots the units the first attempt never reached, into
+        that attempt's own directory, so a later `undo` covers the whole bounds
+        rather than the part the second attempt happened to touch.
+        """
+        original = lookup(job_id)
+        if original.state in (State.QUEUED, State.RUNNING):
+            raise HTTPException(
+                status_code=409,
+                detail=f"job {job_id} is {original.state}; retry is for one that stopped",
+            )
+
+        request = JobRequest(
+            world=original.request.world,
+            palette=original.request.palette,
+            bounds=original.request.bounds,
+            ops=[
+                RestoreOp(
+                    op="restore",
+                    min=original.request.bounds.min,
+                    max=original.request.bounds.max,
+                    job=job_id,
+                ),
+                *original.request.ops,
+            ],
+        )
+        job = store.create(original.world_id, request)
+        return SubmitResponse(job_id=job.job_id, world_id=original.world_id)
+
     @app.post("/v1/jobs/{job_id}/abandoned")
     def abandoned(job_id: int) -> Response:
         # The mod restarted holding this job id. Reported rather than inferred,

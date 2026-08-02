@@ -316,45 +316,67 @@ local function restores_from(job)
     return nil
 end
 
+--- Does this job build anything of its own, beyond putting a region back?
+local function rebuilds(job)
+    local rest = {}
+    for _, op in ipairs(job.ops or {}) do
+        if op.op ~= "restore" then
+            rest[#rest + 1] = op
+        end
+    end
+    return apply.writes(rest)
+end
+
 --- The snapshot half of the environment `world.build` runs a job in.
 ---
---- A job either records what it is about to change, or puts back what another
---- one changed -- never both. Snapshotting a restore would record the undone
---- state as if it were original, so undoing an undo would restore the undo.
+--- Three shapes of job, told apart by what their op list holds:
+---
+---   * a build snapshots into its own directory;
+---   * an **undo** -- a restore and nothing else -- records nothing, because
+---     snapshotting it would capture the undone state as if it were original
+---     and undoing the undo would then restore the undo;
+---   * a **retry** -- a restore followed by the original ops -- does both, and
+---     records into the *original* job's directory. That is what makes the
+---     write-once rule span attempts: units the first attempt reached keep
+---     their file, and units it died before reaching get one now.
 local function snapshot_env(job)
     local from = restores_from(job)
+    local env = {}
 
     if from then
-        return {
-            restore = function(unit_index, buf, area, lo, hi)
-                local region, code, message = snapstore.load(from, unit_index)
-                if not region then
-                    -- No snapshot means this unit was never modified, so there
-                    -- is nothing to put back. Only a damaged one is an error.
-                    if code == "snapshot_missing" then
-                        return 0
-                    end
-                    return nil, code, message
+        env.restore = function(unit_index, buf, area, lo, hi)
+            local region, code, message = snapstore.load(from, unit_index)
+            if not region then
+                -- No snapshot means this unit was never modified, so there is
+                -- nothing to put back. Only a damaged one is an error.
+                if code == "snapshot_missing" then
+                    return 0
                 end
-                return snapshot.restore_into(buf, area, lo, hi, region)
-            end,
-        }
+                return nil, code, message
+            end
+            return snapshot.restore_into(buf, area, lo, hi, region)
+        end
     end
+
+    if not rebuilds(job) then
+        return env
+    end
+
+    local target = from or job.job_id
 
     -- Uncommitted leftovers from an attempt that died mid-write. Removed before
     -- this attempt starts, so nothing can mistake one for a commit.
-    snapstore.sweep_temp(job.job_id)
-    snapstore.write_manifest(job.job_id, {
+    snapstore.sweep_temp(target)
+    snapstore.write_manifest(target, {
         bounds = { min = job.bounds.min, max = job.bounds.max },
         unit_blocks = plan.UNIT_BLOCKS,
         partitioner = plan.PARTITIONER,
     })
 
-    return {
-        snapshot = function(unit_index, region)
-            return snapstore.capture(job.job_id, unit_index, region, region.count)
-        end,
-    }
+    env.snapshot = function(unit_index, region)
+        return snapstore.capture(target, unit_index, region, region.count)
+    end
+    return env
 end
 
 local function run_job(job)
