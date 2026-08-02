@@ -56,34 +56,54 @@ luantibot/
 │   └── implementation_plan.md
 ├── src/luantibot/
 │   ├── __init__.py
-│   ├── ops.py              # wire-format dataclasses/models, versioning
-│   ├── compile/            # intent → ops. Pure functions, no I/O.
+│   ├── ops.py              # wire-format models, versioning
+│   ├── geometry.py         # mapblocks and mapgen chunks; mirrors plan.lua
+│   ├── compile/            # intent → ops. Pure functions, no I/O. (M7)
 │   │   ├── boxes.py
 │   │   ├── corridor.py
 │   │   └── road.py
 │   ├── service/
 │   │   ├── app.py          # FastAPI app
-│   │   ├── store.py        # SQLite, single writer
+│   │   ├── store.py        # SQLite and in-memory, one Store protocol
+│   │   ├── logconfig.py    # timestamps, so lines line up with debug.txt
+│   │   ├── __main__.py     # entry point
 │   │   └── schema.sql
 │   └── mcp_server.py       # MCP tools → HTTP client of the service
 ├── tests/
 │   ├── unit/               # pure Python, fast
-│   ├── api/                # FastAPI TestClient
+│   ├── api/                # FastAPI TestClient, run against both stores
 │   └── contract/           # validates shared fixtures
 ├── contract/
 │   └── fixtures/*.json     # shared between Python and Lua tests
+├── scripts/
+│   ├── lua-env.sh          # project-local LuaJIT rocks tree on PATH
+│   ├── busted              # unit suite, output capped
+│   ├── luacheck            # static analysis
+│   ├── capped              # bounds a command's output and kills a runaway
+│   ├── coverage            # luacov over src/, kept out of the normal run
+│   └── integration         # boots a scratch server, asserts, shuts down
 └── mods/luantibot/
     ├── mod.conf
     ├── init.lua            # wiring: acquires engine handles, injects them
+    ├── .busted             # spec paths
+    ├── .luacov             # coverage config; includeuntestedfiles matters
     ├── src/
-    │   ├── validate.lua    # pure
-    │   ├── plan.lua        # pure: job → work units
-    │   ├── palette.lua     # pure: takes an injected resolve(name) -> id
-    │   ├── apply.lua       # pure: ops + area bounds → mutate a data array
-    │   ├── poll.lua        # pure: state machine; takes injected http + json
-    │   ├── world.lua       # adapter: emerge, VoxelManip, content ids
+    │   ├── version.lua     # pure: wire format acceptance
+    │   ├── parse.lua       # pure: chat command arguments
+    │   ├── identity.lua    # pure: which world is this, may we act in it
+    │   ├── plan.lua        # pure: box → work units, ops clipped to a unit
+    │   ├── validate.lua    # pure: the wire contract's rules
+    │   ├── palette.lua     # pure: names → content ids, injected resolve
+    │   ├── match.lua       # pure: names and group: → a content-id set
+    │   ├── apply.lua       # pure: ops → mutate content and param2 arrays
+    │   ├── survey.lua      # pure: columns → first walkable surface
+    │   ├── emerge.lua      # pure: accounting for the emerge callback
+    │   ├── poll.lua        # pure: the polling state machine
+    │   ├── world.lua       # pure: the unit walk; engine injected
+    │   ├── client.lua      # adapter: HTTP
+    │   ├── storage.lua     # adapter: mod storage
     │   └── snapshot.lua    # adapter: region serialisation (M6)
-    └── spec/               # busted tests
+    └── spec/               # busted tests, one per pure module
 ```
 
 The mod must be visible to Luanti. Symlink it once:
@@ -150,6 +170,11 @@ luarocks --lua-version=5.1 --lua-dir="$(brew --prefix luajit)" \
          --tree=.luarocks install luacheck
 ```
 
+Add `luacov` the same way for coverage. Every flag matters: Homebrew's luarocks
+is itself a Lua 5.5 script and so defaults to installing there, where nothing in
+this project can see it — and the failure is silent, because `luarocks list`
+happily shows the rock it just put somewhere useless.
+
 `scripts/lua-env.sh` wraps the resulting `LUA_PATH`/`PATH` dance; run the tools
 through `./scripts/busted` and `./scripts/luacheck` rather than directly.
 
@@ -160,6 +185,21 @@ through `./scripts/busted` and `./scripts/luacheck` rather than directly.
   which in Lua are silently `nil` rather than an error. This is the single
   highest-value Lua tool.
 - **stylua** — formatter. Rust binary, no config needed beyond a line width.
+- **luacov** — line coverage, via `./scripts/coverage`. Deliberately not part of
+  the normal run: `debug.sethook` turns LuaJIT's compiler off, so an
+  instrumented suite costs a few hundred times a plain one, which looks
+  indistinguishable from a hang. Its config lives in `mods/luantibot/.luacov`,
+  and `includeuntestedfiles` there is load-bearing — without it a module with no
+  spec at all is simply absent from the report and the total is computed over
+  whatever happened to run. It read 98.89% while two modules sat at zero.
+
+**Every test run goes through `scripts/capped`.** Python test runners truncate
+their own assertion diffs; busted does not, so an assertion over a large
+collection formats the entire difference into one string. One did, and the
+editor reached 20 GB before it could be stopped. The wrapper caps the stream and
+kills the producer rather than merely hiding the output — but the real lesson is
+in the assertions: report a count and a couple of examples, never a whole
+collection.
 
 `.luacheckrc`:
 
@@ -411,13 +451,26 @@ independently.
   "bounds": {"min": [-6000, -20, -5500], "max": [-5800, 30, -5350]},
   "ops": [
     {"op": "emerge"},
+    {"op": "survey", "min": [-6000,-20,-5500], "max": [-5800,30,-5350],
+     "step": 8},
     {"op": "fill_box_if", "min": [-6000,10,-5500], "max": [-5995,15,-5495],
-     "node": 2, "match": ["air", "group:liquid", "group:falling_node"]},
+     "node": 2, "param2": 0,
+     "match": ["air", "group:liquid", "group:falling_node"], "invert": false},
     {"op": "fill_box", "min": [-5999,11,-5499], "max": [-5996,14,-5496],
-     "node": 0}
+     "node": 0, "param2": 0}
   ]
 }
 ```
+
+`param2` is not decoration and not optional: it is a trapdoor's facing, a slab's
+half, a dyed block's colour. A fill replaces the node completely, so leaving it
+unset would let the new node inherit the orientation of whatever it overwrote.
+Every writing op therefore carries it, defaulted to 0.
+
+`survey` writes nothing. Its answer comes back in the job's completion result
+under `columns`, one entry per sampled column, giving the height and name of the
+first **walkable** node — not the first node, which would put a surface on top
+of a flower.
 
 Rules the mod enforces, in order, before touching the world:
 
@@ -851,9 +904,17 @@ in-world triggering it — and the run asserts the service's own row reads
   response descriptions, which is what lets a bare Lua interpreter test the
   whole state machine — backoff, one-request-in-flight, report-then-poll — with
   no network and no engine.
-- **Rebinding bumps an epoch**, and a response arriving under a stale epoch is
-  dropped. Without it, a poll in flight when you `/lb_world_bind` could resolve
-  against the identity you just abandoned and attach work to the wrong world.
+- **Rebinding drops the in-flight request**, so a reply that arrives afterwards
+  has nothing to be attributed to and is answered `stale`. Without it, a poll in
+  flight when you `/lb_world_bind` could resolve against the identity you just
+  abandoned and attach work to the wrong world.
+
+  There was an epoch counter beside this doing the same job, and it was removed
+  once coverage showed it could never fire: clearing the in-flight record always
+  caught the case first. Two mechanisms for one hazard, one of them unreachable,
+  is worse than one with a test — `spec/poll_spec.lua` now asserts the
+  behaviour after both `rebind` and `forget`, so the guarantee survives whoever
+  next edits `_reset_timing`.
 - **A failed completion report does not retry forever.** The job is finished
   either way and the service sweeps a cold row as `interrupted`; retrying would
   strand the mod on a job it has already done.
