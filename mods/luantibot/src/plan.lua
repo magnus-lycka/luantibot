@@ -82,6 +82,15 @@ end
 --- latency, because nobody else is on this server.
 plan.UNIT_BLOCKS = 5
 
+--- Bumped whenever `plan.units` would partition the same box differently.
+---
+--- A snapshot directory is read back by recomputing the partition, so a change
+--- here silently remaps old snapshots onto new units. Recording it in each
+--- job's manifest is what lets a restore refuse rather than restore the wrong
+--- region -- see "Derive the manifest from the directory" in
+--- docs/implementation_plan.md.
+plan.PARTITIONER = 1
+
 --- Partition a box into disjoint, mapblock-aligned work units.
 ---
 --- Disjoint is the load-bearing word. Units may *read* overlapping regions --

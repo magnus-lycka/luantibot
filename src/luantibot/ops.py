@@ -153,7 +153,38 @@ class SurveyOp(Strict):
         return self
 
 
-Op = Annotated[EmergeOp | FillBoxOp | FillBoxIfOp | SurveyOp, Field(discriminator="op")]
+class RestoreOp(Strict):
+    """Put a region back the way a job's snapshots found it.
+
+    `job` names whose snapshots to replay, which is not this job: `undo`
+    enqueues a *new* job that restores from the original one's directory.
+
+    Carries a box so the unit walk can clip it like any other op, and no
+    palette -- what it writes was settled when the snapshot was taken. Order
+    across units does not matter: each snapshot covers exactly one unit and
+    they are disjoint.
+
+    What it restores is node type and orientation. Node metadata, inventories
+    and timers are not captured, so undoing a build placed over chests returns
+    the nodes and loses their contents. A convenience, not a transaction.
+    """
+
+    op: Literal["restore"]
+    min: Vec3
+    max: Vec3
+    job: int = Field(ge=1)
+
+    @model_validator(mode="after")
+    def well_formed(self) -> RestoreOp:
+        if any(lo > hi for lo, hi in zip(self.min, self.max, strict=True)):
+            raise ValueError("op min must not exceed max on any axis")
+        return self
+
+
+Op = Annotated[
+    EmergeOp | FillBoxOp | FillBoxIfOp | SurveyOp | RestoreOp,
+    Field(discriminator="op"),
+]
 
 
 class JobRequest(Strict):

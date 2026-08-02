@@ -15,7 +15,7 @@ from typing import Annotated, Any
 from fastapi import Body, FastAPI, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from luantibot.ops import JobDocument, JobRequest
+from luantibot.ops import JobDocument, JobRequest, RestoreOp
 from luantibot.service.store import Job, NotFound, State, Store, World, WrongState
 
 CompletionResult = Annotated[dict[str, Any], Body(default_factory=dict)]
@@ -183,6 +183,37 @@ def create_app(store: Store) -> FastAPI:
         # Also renews the heartbeat, which is what lets a long job be told
         # apart from a dead one.
         return transition(store.mark_progress, job_id, report.units_done, report.units_total)
+
+    @app.post("/v1/jobs/{job_id}/undo", status_code=201)
+    def undo(job_id: int) -> SubmitResponse:
+        """Enqueue a job that puts the region back the way this one found it.
+
+        A new job rather than a state change on the old one: undoing is work,
+        it can fail, and it wants the same lifecycle -- progress, heartbeat,
+        recovery -- as any other. The original row stays exactly as it was, so
+        history says what happened rather than what was later regretted.
+        """
+        original = lookup(job_id)
+        if original.state is State.QUEUED:
+            raise HTTPException(
+                status_code=409,
+                detail=f"job {job_id} has not run yet, so there is nothing to undo",
+            )
+
+        request = JobRequest(
+            world=original.request.world,
+            bounds=original.request.bounds,
+            ops=[
+                RestoreOp(
+                    op="restore",
+                    min=original.request.bounds.min,
+                    max=original.request.bounds.max,
+                    job=job_id,
+                )
+            ],
+        )
+        job = store.create(original.world_id, request)
+        return SubmitResponse(job_id=job.job_id, world_id=original.world_id)
 
     @app.post("/v1/jobs/{job_id}/abandoned")
     def abandoned(job_id: int) -> Response:

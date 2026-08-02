@@ -84,6 +84,10 @@ return function(deps)
                 end
             end
 
+            -- Which unit this is. `restore` needs it to find the right
+            -- snapshot file; nothing else looks at it.
+            env.unit_index = index
+
             local written, code, message = deps.apply.run(buf, vm.area, unit_ops, pal, env)
             if written == nil then
                 return done({ ok = false, code = code, error = message })

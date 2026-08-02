@@ -42,11 +42,24 @@ local survey = load("survey")({
     end,
 })
 
+local snapshot = load("snapshot")({
+    name = function(id)
+        return core.get_name_from_content_id(id)
+    end,
+    resolve = function(name)
+        if core.registered_nodes[name] == nil then
+            return nil
+        end
+        return core.get_content_id(name)
+    end,
+})
+
 local world = load("world")({
     emerge = emerge,
     apply = apply,
     plan = plan,
     survey = survey,
+    snapshot = snapshot,
     emerge_area = function(p1, p2, on_block)
         core.emerge_area(p1, p2, function(_, action, calls_remaining)
             on_block(emerge_kind(action), calls_remaining)
@@ -96,6 +109,47 @@ local matcher = load("match")({
         end
         return ids
     end,
+})
+
+-- Snapshots live under the world directory, so they travel with the world and
+-- are removed with it. `core.safe_file_write` is what M0 established works from
+-- a non-trusted mod; whether it is internally atomic is still open, which is
+-- why snapstore reads every snapshot back before letting the world change.
+local SNAPSHOT_ROOT = core.get_worldpath() .. "/luantibot_snapshots"
+
+local snapstore = load("snapstore")({
+    snapshot = snapshot,
+    root = SNAPSHOT_ROOT,
+    json = { encode = core.write_json, decode = core.parse_json },
+    fs = {
+        exists = function(path)
+            local f = io.open(path, "rb")
+            if f then
+                f:close()
+                return true
+            end
+            return false
+        end,
+        read = function(path)
+            local f = io.open(path, "rb")
+            if not f then
+                return nil
+            end
+            local data = f:read("*a")
+            f:close()
+            return data
+        end,
+        write = function(path, data)
+            core.mkdir(path:match("^(.*)/[^/]+$"))
+            return core.safe_file_write(path, data) ~= false
+        end,
+        list = function(dir)
+            return core.get_dir_list(dir, false) or {}
+        end,
+        remove = function(path)
+            return os.remove(path) ~= nil
+        end,
+    },
 })
 
 -- MUST be at load time. core.request_http_api() returns nil if called later,
@@ -252,6 +306,57 @@ local function fail_job(job, code, message)
     poller:finish(false, { code = code, message = message })
 end
 
+--- Which job's snapshots a restore replays, or nil if this is not one.
+local function restores_from(job)
+    for _, op in ipairs(job.ops or {}) do
+        if op.op == "restore" then
+            return op.job
+        end
+    end
+    return nil
+end
+
+--- The snapshot half of the environment `world.build` runs a job in.
+---
+--- A job either records what it is about to change, or puts back what another
+--- one changed -- never both. Snapshotting a restore would record the undone
+--- state as if it were original, so undoing an undo would restore the undo.
+local function snapshot_env(job)
+    local from = restores_from(job)
+
+    if from then
+        return {
+            restore = function(unit_index, buf, area, lo, hi)
+                local region, code, message = snapstore.load(from, unit_index)
+                if not region then
+                    -- No snapshot means this unit was never modified, so there
+                    -- is nothing to put back. Only a damaged one is an error.
+                    if code == "snapshot_missing" then
+                        return 0
+                    end
+                    return nil, code, message
+                end
+                return snapshot.restore_into(buf, area, lo, hi, region)
+            end,
+        }
+    end
+
+    -- Uncommitted leftovers from an attempt that died mid-write. Removed before
+    -- this attempt starts, so nothing can mistake one for a commit.
+    snapstore.sweep_temp(job.job_id)
+    snapstore.write_manifest(job.job_id, {
+        bounds = { min = job.bounds.min, max = job.bounds.max },
+        unit_blocks = plan.UNIT_BLOCKS,
+        partitioner = plan.PARTITIONER,
+    })
+
+    return {
+        snapshot = function(unit_index, region)
+            return snapstore.capture(job.job_id, unit_index, region, region.count)
+        end,
+    }
+end
+
 local function run_job(job)
     local ok, code, message = validate.job(job, {
         world_id = poller:world_id(),
@@ -342,7 +447,7 @@ local function run_job(job)
             fail_job(job, mcode, mmessage)
             return
         end
-        world.build(p1, p2, prepared, pal, progress, finished)
+        world.build(p1, p2, prepared, pal, progress, finished, snapshot_env(job))
     else
         world.emerge(p1, p2, finished)
     end

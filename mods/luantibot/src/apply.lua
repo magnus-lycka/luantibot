@@ -106,6 +106,19 @@ local ops = {
         return apply.fill_box(buf, area, op.min, op.max, id, op.param2)
     end,
 
+    -- Put a unit back the way a snapshot found it. A write, so the buffer is
+    -- committed afterwards -- but the caller must not snapshot a restore, or
+    -- undoing an undo would record the undone state as if it were original.
+    restore = function(buf, area, op, _, env)
+        if env == nil or env.restore == nil then
+            return nil, "bad_op", "restore needs an environment that can load snapshots"
+        end
+        if env.unit_index == nil then
+            return nil, "bad_op", "restore needs to know which unit it is in"
+        end
+        return env.restore(env.unit_index, buf, area, op.min, op.max)
+    end,
+
     fill_box_if = function(buf, area, op, pal)
         local id, message = pal:id(op.node)
         if id == nil then

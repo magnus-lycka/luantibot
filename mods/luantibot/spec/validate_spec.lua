@@ -409,3 +409,38 @@ describe("validate.job survey", function()
         assert.are.equal("bad_box", code)
     end)
 end)
+
+describe("validate.job restore", function()
+    local ctx = { world_id = 3, max_blocks = 4096 }
+
+    local function op(overrides)
+        local o = { op = "restore", job = 12, min = { 0, 0, 0 }, max = { 15, 15, 15 } }
+        for k, v in pairs(overrides or {}) do
+            o[k] = (v ~= NONE) and v or nil
+        end
+        return job({ ops = { o } })
+    end
+
+    it("accepts a restore naming a job", function()
+        assert.is_true(validate.job(op(), ctx))
+    end)
+
+    it("rejects a restore with no job", function()
+        local ok, code = validate.job(op({ job = NONE }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("bad_op", code)
+    end)
+
+    it("rejects a job id that is not a positive integer", function()
+        assert.is_false(validate.job(op({ job = 0 }), ctx))
+        assert.is_false(validate.job(op({ job = -1 }), ctx))
+        assert.is_false(validate.job(op({ job = 1.5 }), ctx))
+        assert.is_false(validate.job(op({ job = "12" }), ctx))
+    end)
+
+    it("rejects a box outside the bounds", function()
+        local ok, code = validate.job(op({ max = { 99, 15, 15 } }), ctx)
+        assert.is_false(ok)
+        assert.are.equal("box_outside_bounds", code)
+    end)
+end)

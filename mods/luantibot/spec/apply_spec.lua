@@ -562,3 +562,67 @@ describe("apply survey op", function()
         assert.are.equal("bad_op", code)
     end)
 end)
+
+describe("apply restore op", function()
+    local a, buf, pal
+    before_each(function()
+        a = area(p(0, 0, 0), p(3, 3, 3))
+        buf = blank(a, 0)
+        pal = fake_palette(2)
+    end)
+
+    local function op()
+        return { op = "restore", job = 7, min = p(0, 0, 0), max = p(1, 1, 1) }
+    end
+
+    it("counts as both a read and a write", function()
+        assert.is_true(apply.reads({ op() }))
+        assert.is_true(apply.writes({ op() }))
+    end)
+
+    it("hands the unit index and the box to the environment", function()
+        local seen
+        local env = {
+            unit_index = 4,
+            restore = function(index, _, _, lo, hi)
+                seen = { index = index, lo = lo, hi = hi }
+                return 8
+            end,
+        }
+        assert.are.equal(8, apply.run(buf, a, { op() }, pal, env))
+        assert.are.equal(4, seen.index)
+        assert.are.same(p(0, 0, 0), seen.lo)
+        assert.are.same(p(1, 1, 1), seen.hi)
+    end)
+
+    it("passes a failure straight through", function()
+        local env = {
+            unit_index = 0,
+            restore = function()
+                return nil, "snapshot_missing", "no snapshot at /x/0.bin"
+            end,
+        }
+        local n, code = apply.run(buf, a, { op() }, pal, env)
+        assert.is_nil(n)
+        assert.are.equal("snapshot_missing", code)
+    end)
+
+    it("fails without an environment that can load snapshots", function()
+        local n, code = apply.run(buf, a, { op() }, pal, {})
+        assert.is_nil(n)
+        assert.are.equal("bad_op", code)
+    end)
+
+    -- Reaching here without one means the unit walk stopped setting it, and
+    -- restoring the wrong unit's snapshot is silent corruption.
+    it("fails when the unit index is missing", function()
+        local n, code, message = apply.run(buf, a, { op() }, pal, {
+            restore = function()
+                return 1
+            end,
+        })
+        assert.is_nil(n)
+        assert.are.equal("bad_op", code)
+        assert.matches("which unit", message)
+    end)
+end)

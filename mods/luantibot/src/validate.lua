@@ -144,6 +144,20 @@ return function(deps)
 
         fill_box = check_fill,
 
+        -- Carries a box so the unit walk can clip it, and the id of the job
+        -- whose snapshots to replay. No palette: what it writes was decided
+        -- when the snapshot was taken.
+        restore = function(op, index, lo, hi)
+            local code, message = check_box(op, index, lo, hi)
+            if code then
+                return code, message
+            end
+            if not is_int(op.job) or op.job < 1 then
+                return "bad_op", string.format("op %d: job must be a positive integer", index)
+            end
+            return nil
+        end,
+
         -- Read-only, so no palette and no param2 -- only a box and how coarsely
         -- to sample it. A step of 0 would divide by zero in the sampler; a
         -- negative one would loop forever.
