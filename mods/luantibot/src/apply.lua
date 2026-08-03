@@ -109,14 +109,23 @@ local ops = {
     -- Put a unit back the way a snapshot found it. A write, so the buffer is
     -- committed afterwards -- but the caller must not snapshot a restore, or
     -- undoing an undo would record the undone state as if it were original.
-    restore = function(buf, area, op, _, env)
+    --
+    -- **Restores the unit, not the op's box.** A snapshot covers a whole unit;
+    -- the box has been clipped to its intersection with one, which is smaller
+    -- wherever the caller's region was not mapblock-aligned. Writing a
+    -- unit-sized snapshot into a box-sized hole is a size mismatch at best and
+    -- silent misplacement at worst, so the box decides only *whether* this unit
+    -- is restored.
+    -- `op` is deliberately unused: clip_ops has already decided this unit is in
+    -- scope, and the unit is what gets restored.
+    restore = function(buf, area, _, _, env)
         if env == nil or env.restore == nil then
             return nil, "bad_op", "restore needs an environment that can load snapshots"
         end
-        if env.unit_index == nil then
+        if env.unit_index == nil or env.unit_min == nil then
             return nil, "bad_op", "restore needs to know which unit it is in"
         end
-        return env.restore(env.unit_index, buf, area, op.min, op.max)
+        return env.restore(env.unit_index, buf, area, env.unit_min, env.unit_max)
     end,
 
     fill_box_if = function(buf, area, op, pal)

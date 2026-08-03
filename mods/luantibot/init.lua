@@ -177,6 +177,11 @@ luantibot = {
     palette = palette,
     identity = identity,
     validate = validate,
+    -- Exposed for the integration harness, which is the only place undo can be
+    -- proved: it needs to read a region with a real VoxelManip before and after,
+    -- which no unit test can do.
+    snapshot = snapshot,
+    snapstore = snapstore,
     local_world = LOCAL_WORLD,
 }
 

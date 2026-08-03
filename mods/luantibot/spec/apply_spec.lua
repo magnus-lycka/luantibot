@@ -580,24 +580,33 @@ describe("apply restore op", function()
         assert.is_true(apply.writes({ op() }))
     end)
 
-    it("hands the unit index and the box to the environment", function()
+    -- The bug the integration oracle caught: a snapshot covers the whole unit,
+    -- while the op's box has been clipped to the part of it the caller asked
+    -- about. Restoring into the box would be the wrong size whenever the
+    -- caller's region was not mapblock-aligned.
+    it("restores the unit, not the clipped op box", function()
         local seen
         local env = {
             unit_index = 4,
+            unit_min = p(0, 0, 0),
+            unit_max = p(3, 3, 3),
             restore = function(index, _, _, lo, hi)
                 seen = { index = index, lo = lo, hi = hi }
                 return 8
             end,
         }
+        -- The op's box is 2x2x2 inside a 4x4x4 unit.
         assert.are.equal(8, apply.run(buf, a, { op() }, pal, env))
         assert.are.equal(4, seen.index)
         assert.are.same(p(0, 0, 0), seen.lo)
-        assert.are.same(p(1, 1, 1), seen.hi)
+        assert.are.same(p(3, 3, 3), seen.hi, "restored the op box instead of the unit")
     end)
 
     it("passes a failure straight through", function()
         local env = {
             unit_index = 0,
+            unit_min = p(0, 0, 0),
+            unit_max = p(1, 1, 1),
             restore = function()
                 return nil, "snapshot_missing", "no snapshot at /x/0.bin"
             end,

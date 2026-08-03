@@ -84,9 +84,12 @@ return function(deps)
                 end
             end
 
-            -- Which unit this is. `restore` needs it to find the right
-            -- snapshot file; nothing else looks at it.
+            -- Which unit this is, and where it is. `restore` needs both: the
+            -- index to find the snapshot file, and the bounds because a
+            -- snapshot covers the whole unit while the op's box has been
+            -- clipped to the intersection. Nothing else looks at them.
             env.unit_index = index
+            env.unit_min, env.unit_max = unit.min, unit.max
 
             local written, code, message = deps.apply.run(buf, vm.area, unit_ops, pal, env)
             if written == nil then

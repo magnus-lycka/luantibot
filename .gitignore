@@ -240,3 +240,6 @@ luantibot.sqlite-shm
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# Claude
+.claude/settings.local.json

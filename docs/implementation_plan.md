@@ -1158,15 +1158,40 @@ guards.
 
 #### Built so far
 
-`src/snapshot.lua` and its spec: the format above, encode and decode, with the
-header readable on its own so `undo` can check every name is still registered
-before it starts changing the world. Measured at 0.01s to encode a full 5×5×5
-unit — 512,000 nodes, 1 MB at two bytes each.
+Everything below except the crash cases. `snapshot.lua` (the format, plus
+lifting a unit out of a VoxelManip buffer and putting it back), `snapstore.lua`
+(the per-unit rule and the commit protocol), the `restore` op, `undo` and
+`retry`, and the oracle in the integration harness.
 
-Six of its tests encode under one registry and decode under a different one,
-which is the case a format storing raw ids would get wrong silently. Still to
-build: the per-unit rule and commit protocol below, the `undo` and `retry`
-endpoints, and the element-wise oracle.
+Encoding a full 5×5×5 unit measures 0.01s — 512,000 nodes, 1 MB at two bytes
+each. Six of the format's tests encode under one node registry and decode under
+a different one, which is the case a format storing raw ids would get wrong
+silently.
+
+**The oracle earned its place on the first run.** It failed with `snapshot holds
+40960 nodes but the unit is 18432`: snapshots are taken over the *unit*, but
+restore was writing over the op's *clipped box*, which is smaller wherever the
+caller's region is not mapblock-aligned. Every one of the 345 unit tests used
+aligned boxes and none could see it. A restore is unit-shaped by construction;
+the op's box decides only whether a unit is in scope.
+
+Two departures from the description below, both deliberate:
+
+- **A snapshot covers the unit, not the VoxelManip's region.** The buffer is
+  larger — the VM rounds outward — and that rim is read *after* the neighbouring
+  unit was written, so a whole-buffer snapshot would record post-build state and
+  restore it back. Undoing in reverse order happens to untangle that; taking the
+  unit alone means nobody has to reconstruct the argument. It also makes restore
+  order irrelevant, since the files are then disjoint.
+- **Every snapshot is read back before the world changes.** `safe_file_write`
+  being atomic is listed under "To verify before relying on it" and the whole
+  protocol rests on it, so `capture` parses the header it just wrote and checks
+  the node count. That turns a filesystem promise into an observed fact for the
+  price of one read against work dominated by emerge.
+
+Still to build: the kill-and-retry cases in the **Done when** list, which need a
+harness that can kill the server and restart it rather than one that asserts and
+shuts down cleanly.
 
 #### The snapshot rule
 
